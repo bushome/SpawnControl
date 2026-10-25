@@ -61,8 +61,9 @@ the plugin was built with.
 2. Copy the `out\SpawnControl` folder to `ShooterGame\Binaries\Win64\ArkApi\Plugins\`. The folder and the DLL
    must keep the same name.
 3. Start the server. `ArkApi.log` shows `Config loaded: ... using <section> for map <name>`. About a minute
-   after the world is up the first census finishes; if it queued anything, the log shows
-   `Census: ... queued N (...)` and then `Removed ...` lines as the queue drains.
+   after the world is up the first census finishes; if anything is over its rules, the log shows
+   `Census: ... N over the rules (...), M newly queued, queue Q`, and once a minute
+   `Removed in the last 60 s: total (per class, largest first)` while removals happen.
 
 To update a running server, drop the new build in as `SpawnControl.dll.ArkApi`. If automatic plugin
 reloading is enabled in ArkServerApi's own `config.json`, it swaps it in.
@@ -87,7 +88,7 @@ Comments are allowed. `configs\config.commented.json` has the same values with e
 | `CensusActorsPerTick` | 5000 | Level actors the census looks at per second. |
 | `CensusIntervalSeconds` | 60 | Seconds between census passes. |
 | `NearPlayerDistance` | 10000 | Unreal units (300 = one foundation). Queued creatures closer than this to a player wait. |
-| `LogRemovals` | true | Log what each drained queue removed, per class. |
+| `LogRemovals` | true | Once a minute, log how many creatures were removed and of which classes. Once a class is at its limit, this shows how much the zones keep refilling it. |
 
 ### Protect
 

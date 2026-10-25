@@ -11,7 +11,7 @@
     "CensusIntervalSeconds": 60,
     // Creatures closer than this to any player (Unreal units, 300 = one foundation) are removed last.
     "NearPlayerDistance": 10000,
-    // Log each removal pass (counts per class) to the plugin log.
+    // Once a minute, log how many creatures were removed and of which classes, largest first.
     "LogRemovals": true
   },
 

@@ -123,6 +123,8 @@ namespace
 	size_t g_removed_total = 0;
 	size_t g_removed_skipped = 0; // gone, owned or protected by the time their turn came
 	std::unordered_map<int, size_t> g_removed_since_log;
+	int g_seconds_since_log = 0;
+	constexpr int kLogIntervalSeconds = 60;
 	double g_hook_total_us = 0;
 	double g_hook_max_us = 0;
 
@@ -381,20 +383,27 @@ namespace
 		}
 	}
 
+	// One summary line per minute: how many were removed and of which classes, largest first.
 	void LogRemovals()
 	{
 		if (g_removed_since_log.empty())
 			return;
 		if (g_settings.log_removals)
 		{
-			std::ostringstream text;
-			bool first = true;
+			std::vector<std::pair<size_t, int>> rows;
+			size_t total = 0;
 			for (const auto& [class_index, count] : g_removed_since_log)
 			{
-				text << (first ? "" : ", ") << count << " " << g_classes[class_index].info.short_name;
-				first = false;
+				rows.emplace_back(count, class_index);
+				total += count;
 			}
-			Log::GetLog()->info("Removed {}", text.str());
+			std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+
+			std::ostringstream text;
+			for (size_t i = 0; i < rows.size(); ++i)
+				text << (i == 0 ? "" : ", ") << rows[i].first << " " << g_classes[rows[i].second].info.short_name;
+			Log::GetLog()->info("Removed in the last {} s: {} ({}); queue {}", kLogIntervalSeconds, total, text.str(),
+				g_queue.size());
 		}
 		g_removed_since_log.clear();
 	}
@@ -437,9 +446,6 @@ namespace
 			++g_removed_since_log[item.class_index];
 			--budget;
 		}
-
-		if (g_queue.empty())
-			LogRemovals();
 	}
 
 	// ------------------------------------------------------------------------------------------
@@ -525,11 +531,12 @@ namespace
 		g_counts_ready = true;
 
 		// Anything already queued is still on its way out; the plan counted it as present.
+		size_t newly_queued = 0;
 		for (size_t id : plan.remove)
 		{
 			APrimalDinoCharacter* dino = g_census_items[id].creature.Get();
-			if (dino != nullptr)
-				Enqueue(dino, g_census_items[id].class_index);
+			if (dino != nullptr && Enqueue(dino, g_census_items[id].class_index))
+				++newly_queued;
 		}
 
 		g_building.finished = Clock::now();
@@ -545,8 +552,9 @@ namespace
 		g_census_items.clear();
 
 		if (plan.remove.size() > 0)
-			Log::GetLog()->info("Census: {} wild, {} mission; queued {} ({} blocked, {} over limit, {} over group)",
-				g_last.wild, g_last.mission, plan.remove.size(), plan.blocked, plan.over_limit, plan.over_group);
+			Log::GetLog()->info("Census: {} wild, {} mission; {} over the rules ({} blocked, {} over limit, {} over group), "
+				"{} newly queued, queue {}", g_last.wild, g_last.mission, plan.remove.size(), plan.blocked, plan.over_limit,
+				plan.over_group, newly_queued, g_queue.size());
 	}
 
 	// One slice of the census: up to CensusActorsPerTick level actors.
@@ -661,6 +669,12 @@ namespace
 		else if (++g_seconds_since_census >= g_settings.census_interval_seconds || !g_have_report)
 		{
 			StartCensus();
+		}
+
+		if (++g_seconds_since_log >= kLogIntervalSeconds)
+		{
+			g_seconds_since_log = 0;
+			LogRemovals();
 		}
 
 		if (!g_queue.empty())
