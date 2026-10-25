@@ -131,6 +131,24 @@ namespace
 	std::unordered_map<int, size_t> g_removed_since_log;
 	double g_hook_total_us = 0;
 	double g_hook_max_us = 0;
+
+	// Time the timer callback spends on each job, in milliseconds. This is the whole of the plugin's
+	// per-tick cost, so a hitch caused by it shows up here as a high max.
+	struct Timing
+	{
+		double total_ms = 0;
+		double max_ms = 0;
+		size_t ticks = 0;
+		void Add(double ms)
+		{
+			total_ms += ms;
+			max_ms = (std::max)(max_ms, ms);
+			++ticks;
+		}
+		double Average() const { return ticks > 0 ? total_ms / ticks : 0.0; }
+	};
+	Timing g_census_timing;  // ticks that ran a census slice
+	Timing g_drain_timing;   // ticks that removed at least one creature
 	size_t g_hook_calls = 0;
 
 	bool g_hook_installed = false;
@@ -652,11 +670,24 @@ namespace
 			ApplyRules();
 
 		if (g_census_running)
+		{
+			const auto start = Clock::now();
 			StepCensus();
+			g_census_timing.Add(std::chrono::duration<double, std::milli>(Clock::now() - start).count());
+		}
 		else if (++g_seconds_since_census >= g_settings.census_interval_seconds || !g_have_report)
+		{
 			StartCensus();
+		}
 
-		DrainQueue();
+		if (!g_queue.empty())
+		{
+			const size_t removed_before = g_removed_total;
+			const auto start = Clock::now();
+			DrainQueue();
+			if (g_removed_total != removed_before)
+				g_drain_timing.Add(std::chrono::duration<double, std::milli>(Clock::now() - start).count());
+		}
 	}
 
 	void SafeTimer()
@@ -695,6 +726,9 @@ namespace
 		out << "Queue " << g_queue.size() << ", removed " << g_removed_total << " (skipped " << g_removed_skipped
 			<< "), spawn check avg " << (g_hook_calls > 0 ? g_hook_total_us / g_hook_calls : 0.0) << " us, max "
 			<< g_hook_max_us << " us\n";
+		out << "Per tick: census slice avg " << g_census_timing.Average() << " ms, max " << g_census_timing.max_ms
+			<< " ms; removals avg " << g_drain_timing.Average() << " ms, max " << g_drain_timing.max_ms << " ms ("
+			<< g_drain_timing.ticks << " ticks)\n";
 
 		if (!filter.empty())
 		{

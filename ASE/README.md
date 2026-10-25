@@ -125,7 +125,7 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 
 | Command | What it does |
 |---|---|
-| `SpawnControl.List [text]` | Map, config section, last census, queue, removals and spawn-check timing; then every limited or blocked class with its count, every group, the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
+| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, spawn-check timing and per-tick time spent on census slices and removals (average and worst, in ms); then every limited or blocked class with its count, every group, the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
 | `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. |
 
 ## Troubleshooting
@@ -136,6 +136,9 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 - **`Could not hook APrimalDinoCharacter.BeginPlay...`.** The ArkServerApi on the server does not know that
   function, usually because it is out of date for the game version. The census still enforces every rule,
   only less promptly.
+- **Checking for hitches without a player online.** `SpawnControl.List` over RCON shows the worst tick the
+  census and the removals have taken. A few milliseconds is invisible; if the removals' max climbs, lower
+  `RemovalsPerTick`, and if the census slice's does, lower `CensusActorsPerTick`.
 - **A count sits slightly over its limit.** Spawns between two census passes are checked against counts that
   include creatures killed since the last pass, so a class can float a little over or under its limit; each
   pass corrects it.
