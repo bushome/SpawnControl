@@ -91,6 +91,7 @@ static void TestParsing()
 	const Settings defaults = Parse("{}");
 	CHECK(defaults.warnings.empty());
 	CHECK(defaults.removals_per_tick == 10);
+	CHECK(defaults.refuse_full_entries);
 	CHECK(defaults.protected_paths.size() == 1 && defaults.protected_paths[0] == "/Missions/");
 	CHECK(defaults.maps.empty());
 
@@ -238,6 +239,25 @@ static void TestOverOnSpawn()
 	CHECK(!OverOnSpawn(blocked, 1, {}, groups));
 }
 
+static void TestIsFull()
+{
+	std::vector<GroupRule> groups(1);
+	groups[0].max = 2;
+	ClassRule rule;
+	rule.limit = 3;
+	rule.groups = { 0 };
+	CHECK(!IsFull(rule, 2, { 1 }, groups));
+	CHECK(IsFull(rule, 3, { 1 }, groups));      // at the limit: no more
+	CHECK(IsFull(rule, 0, { 2 }, groups));      // group at its max
+	ClassRule free_rule;
+	CHECK(!IsFull(free_rule, 10000, {}, groups));
+	ClassRule blocked;
+	blocked.blocked = true;
+	CHECK(IsFull(blocked, 0, {}, groups));
+	blocked.is_protected = true;
+	CHECK(!IsFull(blocked, 0, {}, groups));
+}
+
 static void TestConfigFile(const std::string& path, bool shipped_expectations)
 {
 	std::ifstream file(path);
@@ -269,6 +289,7 @@ static void TestConfigFile(const std::string& path, bool shipped_expectations)
 	CHECK(settings.census_interval_seconds == 60);
 	CHECK(settings.near_player_distance == 10000.0);
 	CHECK(settings.log_removals);
+	CHECK(settings.refuse_full_entries);
 	CHECK(settings.protected_paths.size() == 1 && settings.protected_paths[0] == "/Missions/");
 	CHECK(settings.protected_families.empty());
 	CHECK(settings.report_families.size() == 1 && settings.report_families[0].base_class == "Thrall_Character_BP_Base_C");
@@ -292,6 +313,7 @@ int main(int argc, char** argv)
 	TestResolve();
 	TestPlan();
 	TestOverOnSpawn();
+	TestIsFull();
 
 	if (argc > 1)
 		TestConfigFile(argv[1], argc > 2 && std::string(argv[2]) == "--shipped");

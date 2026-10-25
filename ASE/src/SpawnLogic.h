@@ -127,6 +127,7 @@ namespace SpawnControl
 		int census_interval_seconds = 60;
 		double near_player_distance = 10000.0; // creatures closer than this to a player are removed last
 		bool log_removals = true;
+		bool refuse_full_entries = true;       // zones skip spawn entries whose creatures are all at their limit
 
 		std::vector<std::string> protected_paths{ "/Missions/" };
 		std::vector<std::string> protected_families;
@@ -263,12 +264,15 @@ namespace SpawnControl
 		settings.census_actors_per_tick = detail::ReadInt(general, "CensusActorsPerTick", settings.census_actors_per_tick, 100, warnings);
 		settings.census_interval_seconds = detail::ReadInt(general, "CensusIntervalSeconds", settings.census_interval_seconds, 5, warnings);
 		settings.near_player_distance = detail::ReadInt(general, "NearPlayerDistance", static_cast<int>(settings.near_player_distance), 0, warnings);
-		if (general.is_object() && general.contains("LogRemovals"))
+		for (const auto& [key, target] : { std::pair<const char*, bool*>{ "LogRemovals", &settings.log_removals },
+				std::pair<const char*, bool*>{ "RefuseFullEntries", &settings.refuse_full_entries } })
 		{
-			if (general["LogRemovals"].is_boolean())
-				settings.log_removals = general["LogRemovals"].get<bool>();
+			if (!general.is_object() || !general.contains(key))
+				continue;
+			if (general[key].is_boolean())
+				*target = general[key].get<bool>();
 			else
-				warnings.push_back("General.LogRemovals must be true or false");
+				warnings.push_back(std::string("General.") + key + " must be true or false");
 		}
 
 		const nlohmann::json protect = root.value("Protect", nlohmann::json::object());
@@ -522,6 +526,26 @@ namespace SpawnControl
 			}
 		}
 		return plan;
+	}
+
+	// For a zone choosing what to spawn: is this class already at everything it may have? Blocked
+	// classes always are. counts are the live counts (creatures already queued for removal excluded).
+	inline bool IsFull(const ClassRule& rule, int class_count, const std::vector<int>& group_counts,
+		const std::vector<GroupRule>& groups)
+	{
+		if (rule.is_protected)
+			return false;
+		if (rule.blocked)
+			return true;
+		if (rule.limit != kNoLimit && class_count >= rule.limit)
+			return true;
+		for (int g : rule.groups)
+		{
+			if (g >= 0 && static_cast<size_t>(g) < groups.size() && static_cast<size_t>(g) < group_counts.size() &&
+				group_counts[g] >= groups[g].max)
+				return true;
+		}
+		return false;
 	}
 
 	// For the spawn hook: should a creature of this class that just appeared be queued for removal,

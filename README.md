@@ -14,8 +14,8 @@ creatures are touched. Tamed and player-owned creatures, and creatures that belo
 are left alone. Removals are spread out a few per second, farthest from players first, so a large cull never
 lands in one server tick.
 
-Status: first version, not yet run on a server. Census, rules, removal queue and the `List`/`Reload` commands
-are in; per-zone caps, mesh detection, spawners and the geometry probe are planned next.
+Status: first version, not yet run on a server. Census, rules, zone-level refusal of full spawn entries, removal
+queue and the `List`/`Reload` commands are in; per-zone caps, mesh detection, spawners and the geometry probe are planned next.
 
 | Folder | Game | Server API (submodule) | Map section picked by |
 |---|---|---|---|

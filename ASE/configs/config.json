@@ -4,7 +4,8 @@
     "CensusActorsPerTick": 5000,
     "CensusIntervalSeconds": 60,
     "NearPlayerDistance": 10000,
-    "LogRemovals": true
+    "LogRemovals": true,
+    "RefuseFullEntries": true
   },
   "Protect": {
     "PathContains": [ "/Missions/" ],

@@ -16,7 +16,11 @@ The ARK: Survival Evolved build lives in `..\ASE`.
    creature that appears over its limit, over its group's limit, or of a blocked class is queued right away.
    The check is a cached rule lookup and a counter comparison; `SpawnControl.List` shows its average and
    worst time.
-3. **Removal.** Nothing is removed in the hook or in bulk. The queue drains `RemovalsPerTick` creatures per
+3. **Zones skip full classes.** `ANPCZoneManager::IsValidNPCEntry` is hooked. When a zone weighs one of its
+   spawn entries and every creature class in it is blocked or at its limit (or its group is), the entry is
+   refused and the zone picks another one, so it spawns other species instead of creatures that would only
+   be removed. The spawn check above stays as the backstop for anything that still gets through.
+4. **Removal.** Nothing is removed in the hook or in bulk. The queue drains `RemovalsPerTick` creatures per
    second. Each one is checked again first (still alive, still wild, not a mission creature, its class still
    has a rule) and then destroyed: no corpse, no loot, no death effects. A creature within
    `NearPlayerDistance` of a player goes to the back of the queue, up to 30 times, so removals happen out of
@@ -93,7 +97,8 @@ Comments are allowed. `configs\config.commented.json` has the same values with e
 | `CensusActorsPerTick` | 5000 | Level actors the census looks at per second. |
 | `CensusIntervalSeconds` | 60 | Seconds between census passes. |
 | `NearPlayerDistance` | 10000 | Unreal units (300 = one foundation). Queued creatures closer than this to a player wait. |
-| `LogRemovals` | true | Once a minute, log how many creatures were removed and of which classes. Once a class is at its limit, this shows how much the zones keep refilling it. |
+| `RefuseFullEntries` | true | Let zones skip spawn entries whose creatures are all blocked or at their limit. |
+| `LogRemovals` | true | Once a minute, log how many creatures were removed and how many zone spawn entries were refused, by class. Once a class is at its limit, this shows how hard the zones still push for it. |
 
 ### Protect
 
@@ -132,7 +137,7 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 
 | Command | What it does |
 |---|---|
-| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, spawn-check timing and per-tick time spent on census slices and removals (average and worst, in ms); then every limited or blocked class with its count, every group, the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
+| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class with its count, every group, the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
 | `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. |
 
 ## Troubleshooting
@@ -140,6 +145,9 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 - **`Config not loaded: ...` at startup.** The message names the problem. Until it is fixed and
   `SpawnControl.Reload` is run, nothing is limited.
 - **`section none` in `List`.** No `Maps` section matches the map name shown on the same line.
+- **`Could not hook ANPCZoneManager.IsValidNPCEntry...`.** The AsaApi on the server does not know that function.
+  Limits still hold; zones just keep spawning full classes for the queue to remove, so the per-minute
+  `Removed` line stays busier.
 - **`Could not hook APrimalDinoCharacter.BeginPlay()...`.** The AsaApi on the server does not know that
   function, usually because it is out of date for the game version. The census still enforces every rule,
   only less promptly.

@@ -12,7 +12,10 @@
     // Creatures closer than this to any player (Unreal units, 300 = one foundation) are removed last.
     "NearPlayerDistance": 10000,
     // Once a minute, log how many creatures were removed and of which classes, largest first.
-    "LogRemovals": true
+    "LogRemovals": true,
+    // Zones choosing what to spawn skip entries whose creatures are all blocked or at their limit, so they
+    // spawn other species instead of creatures that would only be removed again.
+    "RefuseFullEntries": true
   },
 
   // Never touched by blocks or limits, on every map.

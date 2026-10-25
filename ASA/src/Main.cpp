@@ -7,6 +7,9 @@
 //     Blocked classes go first, then the creatures farthest from any player.
 //   - APrimalDinoCharacter::BeginPlay is hooked. Once a census has finished, a creature that appears over
 //     its limit (or of a blocked class) is queued straight away instead of waiting for the next pass.
+//   - ANPCZoneManager::IsValidNPCEntry is hooked. When a zone weighs a spawn entry whose creatures are all
+//     blocked or at their limit, the entry is refused, so the zone spawns something else instead of a
+//     creature that would only be removed again (RefuseFullEntries).
 //   - Removals never happen in the hook or in bulk: a queue drains RemovalsPerTick creatures per second,
 //     each re-checked before it is destroyed (still wild, still not a mission creature, rule still set).
 //
@@ -41,6 +44,7 @@ namespace
 	const char* const kCmdReload = "SpawnControl.Reload";
 	const char* const kCmdList = "SpawnControl.List";
 	const char* const kTimerId = "SpawnControl.Timer";
+	const char* const kHookEntry = "ANPCZoneManager.IsValidNPCEntry(FNPCSpawnEntry&)";
 	const char* const kHookBeginPlay = "APrimalDinoCharacter.BeginPlay()";
 	const char* const kLevelActorsField = "ULevel.Actors2";
 	const wchar_t* const kMapSwitch = L"-SpawnControlMap=";
@@ -148,6 +152,14 @@ namespace
 	size_t g_hook_calls = 0;
 
 	bool g_hook_installed = false;
+	bool g_entry_hook_installed = false;
+
+	// Zone spawn entries weighed and refused, and the time spent deciding.
+	size_t g_entry_checks = 0;
+	size_t g_entry_refused = 0;
+	double g_entry_total_us = 0;
+	double g_entry_max_us = 0;
+	std::unordered_map<int, size_t> g_refused_since_log;  // first full class of each refused entry
 
 	// ------------------------------------------------------------------------------------------
 	// Helpers
@@ -384,8 +396,32 @@ namespace
 	}
 
 	// One summary line per minute: how many were removed and of which classes, largest first.
+	std::string RefusedSummary()
+	{
+		std::vector<std::pair<size_t, int>> rows;
+		size_t total = 0;
+		for (const auto& [class_index, count] : g_refused_since_log)
+		{
+			rows.emplace_back(count, class_index);
+			total += count;
+		}
+		std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+		std::ostringstream text;
+		text << total << " (";
+		for (size_t i = 0; i < rows.size() && i < 8; ++i)
+			text << (i == 0 ? "" : ", ") << rows[i].first << " " << g_classes[rows[i].second].info.short_name;
+		text << ")";
+		return text.str();
+	}
+
 	void LogRemovals()
 	{
+		if (!g_refused_since_log.empty())
+		{
+			if (g_settings.log_removals)
+				Log::GetLog()->info("Spawn entries refused in the last {} s: {}", kLogIntervalSeconds, RefusedSummary());
+			g_refused_since_log.clear();
+		}
 		if (g_removed_since_log.empty())
 			return;
 		if (g_settings.log_removals)
@@ -626,6 +662,63 @@ namespace
 		}
 	}
 
+	// True when every creature class an entry would spawn is blocked or at its limit. An entry with no
+	// readable class, or with any class that still has room, is left to the game.
+	bool EntryIsFull(FNPCSpawnEntry* entry, int& first_full)
+	{
+		first_full = -1;
+		bool any = false;
+		// NPCsToSpawn holds soft class pointers. Only their cached weak pointer is read: it never loads an
+		// asset, and a class that is not loaded has no creatures yet, so it cannot be full.
+		for (TSoftClassPtr<APrimalDinoCharacter>& soft : entry->NPCsToSpawn)
+		{
+			UObject* loaded = reinterpret_cast<FWeakObjectPtr*>(&soft)->Get(false);
+			UClass* cls = static_cast<UClass*>(loaded);
+			if (cls == nullptr)
+				return false;
+			const int class_index = ClassIndexFor(cls);
+			const ClassRule& rule = g_classes[class_index].rule;
+			if (!IsFull(rule, g_class_counts[class_index], g_group_counts, g_rules->groups))
+				return false;
+			if (first_full < 0)
+				first_full = class_index;
+			any = true;
+		}
+		return any;
+	}
+
+	DECLARE_HOOK(ANPCZoneManager_IsValidNPCEntry, bool, ANPCZoneManager*, FNPCSpawnEntry*);
+
+	bool Hook_ANPCZoneManager_IsValidNPCEntry(ANPCZoneManager* _this, FNPCSpawnEntry* entry)
+	{
+		const bool valid = ANPCZoneManager_IsValidNPCEntry_original(_this, entry);
+		if (!valid || entry == nullptr || !g_settings_loaded || !g_settings.refuse_full_entries || g_rules == nullptr ||
+			!g_counts_ready)
+			return valid;
+
+		const auto start = Clock::now();
+		bool refuse = false;
+		try
+		{
+			int first_full = -1;
+			refuse = EntryIsFull(entry, first_full);
+			if (refuse)
+			{
+				++g_entry_refused;
+				++g_refused_since_log[first_full];
+			}
+		}
+		catch (const std::exception& exception)
+		{
+			Log::GetLog()->error("Spawn entry check failed: {}", exception.what());
+		}
+		const double us = std::chrono::duration<double, std::micro>(Clock::now() - start).count();
+		g_entry_total_us += us;
+		g_entry_max_us = (std::max)(g_entry_max_us, us);
+		++g_entry_checks;
+		return refuse ? false : valid;
+	}
+
 	DECLARE_HOOK(APrimalDinoCharacter_BeginPlay, void, APrimalDinoCharacter*);
 
 	void Hook_APrimalDinoCharacter_BeginPlay(APrimalDinoCharacter* _this)
@@ -726,6 +819,10 @@ namespace
 		out << "Per tick: census slice avg " << g_census_timing.Average() << " ms, max " << g_census_timing.max_ms
 			<< " ms; removals avg " << g_drain_timing.Average() << " ms, max " << g_drain_timing.max_ms << " ms ("
 			<< g_drain_timing.ticks << " ticks)\n";
+		out << "Zone entries: " << g_entry_checks << " checked, " << g_entry_refused << " refused, avg "
+			<< (g_entry_checks > 0 ? g_entry_total_us / g_entry_checks : 0.0) << " us, max " << g_entry_max_us << " us"
+			<< (g_entry_hook_installed ? "" : " (hook not installed)")
+			<< (g_settings.refuse_full_entries ? "" : " (RefuseFullEntries off)") << "\n";
 
 		if (!filter.empty())
 		{
@@ -888,6 +985,11 @@ extern "C" __declspec(dllexport) void Plugin_Init()
 		Log::GetLog()->error("Nothing is limited until config.json is fixed and {} is run", kCmdReload);
 	}
 
+	g_entry_hook_installed = AsaApi::GetHooks().SetHook(kHookEntry,
+		reinterpret_cast<LPVOID>(&Hook_ANPCZoneManager_IsValidNPCEntry), &ANPCZoneManager_IsValidNPCEntry_original);
+	if (!g_entry_hook_installed)
+		Log::GetLog()->error("Could not hook {}; zones will keep spawning full classes for the queue to remove", kHookEntry);
+
 	g_hook_installed = AsaApi::GetHooks().SetHook(kHookBeginPlay,
 		reinterpret_cast<LPVOID>(&Hook_APrimalDinoCharacter_BeginPlay), &APrimalDinoCharacter_BeginPlay_original);
 	if (!g_hook_installed)
@@ -909,6 +1011,11 @@ extern "C" __declspec(dllexport) void Plugin_Unload()
 	AsaApi::GetCommands().RemoveRconCommand(kCmdReload);
 	AsaApi::GetCommands().RemoveRconCommand(kCmdList);
 
+	if (g_entry_hook_installed)
+	{
+		AsaApi::GetHooks().DisableHook(kHookEntry, reinterpret_cast<LPVOID>(&Hook_ANPCZoneManager_IsValidNPCEntry));
+		g_entry_hook_installed = false;
+	}
 	if (g_hook_installed)
 	{
 		AsaApi::GetHooks().DisableHook(kHookBeginPlay, reinterpret_cast<LPVOID>(&Hook_APrimalDinoCharacter_BeginPlay));
