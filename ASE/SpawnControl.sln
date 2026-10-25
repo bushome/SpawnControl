@@ -1,0 +1,22 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34723.18
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SpawnControl", "SpawnControl.vcxproj", "{D8CDADCF-4F51-47C9-BD3A-F1B6421F0291}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D8CDADCF-4F51-47C9-BD3A-F1B6421F0291}.Release|x64.ActiveCfg = Release|x64
+		{D8CDADCF-4F51-47C9-BD3A-F1B6421F0291}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {27828259-F8E0-4411-9D6D-53F328C04AED}
+	EndGlobalSection
+EndGlobal

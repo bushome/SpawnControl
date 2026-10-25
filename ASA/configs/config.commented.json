@@ -1,0 +1,78 @@
+// SpawnControl config. Same values as config.json, with comments. Comments are allowed in config.json too.
+// Reload after editing with SpawnControl.Reload (admin console or RCON).
+{
+  "General": {
+    // Creatures removed per second at most. Removals queue up and drain at this rate, so a large cull
+    // never lands in one tick.
+    "RemovalsPerTick": 10,
+    // Level actors looked at per second by the census. A full pass over a busy map takes a few seconds.
+    "CensusActorsPerTick": 5000,
+    // Seconds between census passes. Each pass recounts every wild creature and plans removals.
+    "CensusIntervalSeconds": 60,
+    // Creatures closer than this to any player (Unreal units, 300 = one foundation) are removed last.
+    "NearPlayerDistance": 10000,
+    // Log each removal pass (counts per class) to the plugin log.
+    "LogRemovals": true
+  },
+
+  // Never touched by blocks or limits, on every map.
+  "Protect": {
+    // Class paths containing any of these. "/Missions/" covers outpost and mission creatures that
+    // have their own classes.
+    "PathContains": [ "/Missions/" ],
+    // Classes deriving from any of these parents (e.g. "Thrall_Character_BP_Base_C" for all Thralls).
+    "Families": []
+  },
+
+  // Extra summary rows in SpawnControl.List: label -> parent class. Reporting only, no effect on removal.
+  "ReportFamilies": {
+    "Thralls": "Thrall_Character_BP_Base_C"
+  },
+
+  // One section per map. The section is picked by map name (ASA's "_WP" suffix may be left off), or by
+  // -SpawnControlMap=<section> on the server command line. SpawnControl.List shows which one is in use.
+  //
+  // Class keys: a short class name (Otter_Character_BP_C) matches every class of that name; a full path
+  // as ListDinos prints it (/Game/.../Otter_Character_BP.Otter_Character_BP_C) matches exactly one. For
+  // Limit, a full-path entry wins over a short-name entry for the same class.
+  "Maps": {
+    "LostColony": {
+      // Wild creatures of these classes are removed as soon as they appear.
+      "Block": [],
+      // Maximum wild count per class on this map. 0 means no limit.
+      "Limit": {
+        "Baryonyx_Character_BP_C": 250,
+        "Compy_Character_BP_C": 250,
+        "Dimetro_Character_BP_C": 250,
+        "Dodo_Character_BP_C": 250,
+        "Pachyrhino_Character_BP_C": 250,
+        "Sheep_Character_BP_C": 250,
+        "Rhino_Character_BP_C": 250,
+        "Phiomia_Character_BP_C": 250,
+        "Ptero_Character_BP_C": 250,
+        "Vulture_Character_BP_C": 250,
+        "S-Argent_Character_BP_C": 250,
+        "Bat_Character_BP_C": 200,
+        "Bigfoot_Character_BP_C": 200,
+        "Scorpion_Character_BP_C": 200,
+        "Equus_Character_BP_C": 125,
+        "Microraptor_Character_BP_C": 125,
+        "Dragonfly_Character_BP_Tameable_C": 125,
+        "S-Ankylo_Character_BP_C": 125,
+        "S-Direbear_Character_BP_C": 125,
+        "S-Direwolf_Character_BP_C": 125,
+        "S-Doed_Character_BP_C": 125,
+        "S-Owl_Character_BP_C": 125,
+        "S-Trike_Character_BP_C": 125,
+        "S-Yutyrannus_Character_BP_C": 125
+      },
+      // One shared maximum for several classes, e.g. a creature and its modded variant.
+      "GroupLimit": {
+        "Otters": {
+          "Max": 200,
+          "Classes": [ "Otter_Character_BP_C", "S-Otter_Character_BP_C" ]
+        }
+      }
+    }
+  }
+}

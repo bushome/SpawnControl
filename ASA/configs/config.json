@@ -1,0 +1,53 @@
+{
+  "General": {
+    "RemovalsPerTick": 10,
+    "CensusActorsPerTick": 5000,
+    "CensusIntervalSeconds": 60,
+    "NearPlayerDistance": 10000,
+    "LogRemovals": true
+  },
+  "Protect": {
+    "PathContains": [ "/Missions/" ],
+    "Families": []
+  },
+  "ReportFamilies": {
+    "Thralls": "Thrall_Character_BP_Base_C"
+  },
+  "Maps": {
+    "LostColony": {
+      "Block": [],
+      "Limit": {
+        "Baryonyx_Character_BP_C": 250,
+        "Compy_Character_BP_C": 250,
+        "Dimetro_Character_BP_C": 250,
+        "Dodo_Character_BP_C": 250,
+        "Pachyrhino_Character_BP_C": 250,
+        "Sheep_Character_BP_C": 250,
+        "Rhino_Character_BP_C": 250,
+        "Phiomia_Character_BP_C": 250,
+        "Ptero_Character_BP_C": 250,
+        "Vulture_Character_BP_C": 250,
+        "S-Argent_Character_BP_C": 250,
+        "Bat_Character_BP_C": 200,
+        "Bigfoot_Character_BP_C": 200,
+        "Scorpion_Character_BP_C": 200,
+        "Equus_Character_BP_C": 125,
+        "Microraptor_Character_BP_C": 125,
+        "Dragonfly_Character_BP_Tameable_C": 125,
+        "S-Ankylo_Character_BP_C": 125,
+        "S-Direbear_Character_BP_C": 125,
+        "S-Direwolf_Character_BP_C": 125,
+        "S-Doed_Character_BP_C": 125,
+        "S-Owl_Character_BP_C": 125,
+        "S-Trike_Character_BP_C": 125,
+        "S-Yutyrannus_Character_BP_C": 125
+      },
+      "GroupLimit": {
+        "Otters": {
+          "Max": 200,
+          "Classes": [ "Otter_Character_BP_C", "S-Otter_Character_BP_C" ]
+        }
+      }
+    }
+  }
+}
