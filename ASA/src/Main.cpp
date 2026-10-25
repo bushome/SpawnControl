@@ -108,6 +108,10 @@ namespace
 	std::vector<int> g_class_counts;
 	std::vector<int> g_group_counts;
 
+	// Wild spawns the hook counted while a census was running. The census result replaces the live
+	// counts when it finishes, so these are added back on top or they would be lost until the next pass.
+	std::vector<int> g_spawned_during_census;
+
 	std::deque<QueueItem> g_queue;
 	std::unordered_set<uint64_t> g_queued; // weak pointer keys already in the queue
 
@@ -496,6 +500,7 @@ namespace
 		g_census_started = Clock::now();
 		g_census_items.clear();
 		g_player_positions = PlayerPositions();
+		g_spawned_during_census.assign(g_classes.size(), 0);
 
 		g_building = Report();
 		g_building.family_wild.assign(g_settings.report_families.size(), 0);
@@ -564,6 +569,12 @@ namespace
 		for (size_t c = 0; c < plan.class_counts.size() && c < g_class_counts.size(); ++c)
 			g_class_counts[c] = plan.class_counts[c];
 		g_group_counts = plan.group_counts;
+		for (size_t c = 0; c < g_spawned_during_census.size() && c < g_class_counts.size(); ++c)
+		{
+			if (g_spawned_during_census[c] != 0)
+				AdjustCounts(static_cast<int>(c), g_spawned_during_census[c]);
+		}
+		g_spawned_during_census.clear();
 		g_counts_ready = true;
 
 		// Anything already queued is still on its way out; the plan counted it as present.
@@ -655,10 +666,20 @@ namespace
 
 		// Live counts always mean "after everything already queued is gone".
 		AdjustCounts(class_index, +1);
+		bool kept = true;
 		if (OverOnSpawn(rule, g_class_counts[class_index], g_group_counts, g_rules->groups))
 		{
 			if (Enqueue(dino, class_index))
+			{
 				AdjustCounts(class_index, -1);
+				kept = false;
+			}
+		}
+		if (kept && g_census_running)
+		{
+			if (g_spawned_during_census.size() <= static_cast<size_t>(class_index))
+				g_spawned_during_census.resize(class_index + 1, 0);
+			++g_spawned_during_census[class_index];
 		}
 	}
 
