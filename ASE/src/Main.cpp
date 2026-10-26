@@ -35,6 +35,7 @@
 #include <deque>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -229,6 +230,7 @@ namespace
 		int class_index = 0;
 		double x = 0, y = 0, z = 0;
 		bool overlapping = false;   // the game says it overlaps geometry, not only that it is below it
+		bool in_stasis = false;     // asleep, far from any player, when tested
 		std::string hit;            // the kind of component the test hit
 	};
 	constexpr size_t kMeshRecent = 10;
@@ -939,6 +941,10 @@ namespace
 				if (rule.under_mesh && !rule.is_protected && !item.in_cave && !item.in_block_area)
 					g_mesh_queue.push_back({ item.creature, item.class_index });
 			}
+			// Shuffled, so when the budget does not reach the end before the next census, a different part
+			// of the map goes untested each time instead of always the same one.
+			static std::mt19937 shuffle_rng(std::random_device{}());
+			std::shuffle(g_mesh_queue.begin(), g_mesh_queue.end(), shuffle_rng);
 		}
 		g_building.hotspots = plan.hotspots;
 		g_building.wild_by_class.resize(g_classes.size(), 0);
@@ -1259,8 +1265,11 @@ namespace
 			g_mesh_queue.pop_front();
 			++pops;
 			APrimalDinoCharacter* dino = candidate.creature.Get();
-			if (dino == nullptr || Classify(dino) != Kind::Wild || dino->bStasised()())
-				continue; // gone, tamed, or asleep in stasis: tested when a later census finds it awake
+			if (dino == nullptr || Classify(dino) != Kind::Wild)
+				continue; // gone or tamed
+			const bool in_stasis = dino->bStasised()();
+			if (in_stasis && !g_rules->under_mesh.include_stasis)
+				continue; // asleep in stasis: tested when a later census finds it awake
 			const uint64_t key = WeakKey(candidate.creature);
 			const bool removing = g_rules->under_mesh.remove;
 			if (g_mesh_reported.count(key) > 0 && !removing)
@@ -1303,6 +1312,7 @@ namespace
 			suspect.y = static_cast<double>(location.Y);
 			suspect.z = static_cast<double>(location.Z);
 			suspect.overlapping = overlapping;
+			suspect.in_stasis = in_stasis;
 			UObject* hit_object = reinterpret_cast<UObject*>(hit);
 			suspect.hit = hit_object != nullptr && hit_object->ClassField() != nullptr ? hit_object->ClassField()->NameField().ToString().ToString() : "nothing";
 			g_mesh_recent.push_front(suspect);
@@ -1311,8 +1321,8 @@ namespace
 			if (g_mesh_logged_this_minute < kMeshLogsPerMinute)
 			{
 				++g_mesh_logged_this_minute;
-				Log::GetLog()->info("Under mesh: {} at {:.0f} {:.0f} {:.0f} ({}, hit {})", g_classes[candidate.class_index].info.short_name,
-					suspect.x, suspect.y, suspect.z, overlapping ? "overlapping" : "below", suspect.hit);
+				Log::GetLog()->info("Under mesh: {} at {:.0f} {:.0f} {:.0f} ({}{}, hit {})", g_classes[candidate.class_index].info.short_name,
+					suspect.x, suspect.y, suspect.z, overlapping ? "overlapping" : "below", in_stasis ? ", in stasis" : "", suspect.hit);
 			}
 		}
 	}
@@ -1510,7 +1520,8 @@ namespace
 			}
 			if (g_rules->under_mesh.enabled)
 			{
-				out << "  under mesh (" << (g_rules->under_mesh.remove ? "removing: below on two censuses" : "report only") << "): "
+				out << "  under mesh (" << (g_rules->under_mesh.remove ? "removing: below on two censuses" : "report only")
+					<< (g_rules->under_mesh.include_stasis ? ", stasis included" : ", awake only") << "): "
 					<< g_mesh_checks << " tested, avg "
 					<< (g_mesh_checks > 0 ? g_mesh_total_us / g_mesh_checks : 0.0) << " us, max " << g_mesh_max_us << " us, "
 					<< g_mesh_suspects << " suspects since load";
@@ -1524,7 +1535,7 @@ namespace
 					const int c = suspect.class_index;
 					out << "    " << (c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"))
 						<< " at " << static_cast<int>(suspect.x) << " " << static_cast<int>(suspect.y) << " " << static_cast<int>(suspect.z)
-						<< " (" << (suspect.overlapping ? "overlapping" : "below") << ", hit " << suspect.hit << ")\n";
+						<< " (" << (suspect.overlapping ? "overlapping" : "below") << (suspect.in_stasis ? ", in stasis" : "") << ", hit " << suspect.hit << ")\n";
 				}
 			}
 			if (g_rules->overlap.enabled)

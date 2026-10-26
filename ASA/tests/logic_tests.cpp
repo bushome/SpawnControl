@@ -521,11 +521,11 @@ static void TestUnderMesh()
 {
 	const Settings parsed = Parse(R"({ "Maps": {
 		"A": { "UnderMesh": { "ChecksPerSecond": 50, "Exclude": [ "/ZombieDino/" ] } },
-		"B": { "UnderMesh": { "ChecksPerSecond": 900 } },
+		"B": { "UnderMesh": { "ChecksPerSecond": 1900 } },
 		"C": { "UnderMesh": {} },
 		"D": {} } })");
 	CHECK(parsed.maps[0].under_mesh.enabled && parsed.maps[0].under_mesh.checks_per_second == 50 && parsed.maps[0].under_mesh.exclude.size() == 1);
-	CHECK(parsed.maps[1].under_mesh.checks_per_second == 200);
+	CHECK(parsed.maps[1].under_mesh.checks_per_second == 1000);
 	CHECK(parsed.maps[2].under_mesh.enabled && parsed.maps[2].under_mesh.checks_per_second == 20);
 	CHECK(!parsed.maps[3].under_mesh.enabled);
 	CHECK(parsed.warnings.size() == 1);
@@ -542,7 +542,8 @@ static void TestUnderMesh()
 	CHECK(!ResolveClass(settings, &parsed.maps[0], corrupted).under_mesh);
 	CHECK(!ResolveClass(settings, &parsed.maps[3], raptor).under_mesh);
 
-	CHECK(!parsed.maps[0].under_mesh.remove);
+	CHECK(!parsed.maps[0].under_mesh.remove && !parsed.maps[0].under_mesh.include_stasis);
+	CHECK(Parse(R"({ "Maps": { "A": { "UnderMesh": { "IncludeStasis": true } } } })").maps[0].under_mesh.include_stasis);
 	const Settings removing = Parse(R"({ "Maps": { "A": { "UnderMesh": { "Remove": true } }, "B": { "UnderMesh": { "Remove": "yes" } } } })");
 	CHECK(removing.maps[0].under_mesh.remove && !removing.maps[1].under_mesh.remove && removing.warnings.size() == 1);
 

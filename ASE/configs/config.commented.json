@@ -136,6 +136,9 @@
       "UnderMesh": {
         "ChecksPerSecond": 20,
         "Remove": false,
+        // Also test creatures in stasis, far from players: finds buried or broken spawners anywhere.
+        // Raise ChecksPerSecond with it (about 200 covers a 21,000-creature map every census).
+        "IncludeStasis": false,
         "Exclude": []
       },
       "BlockAreas": [

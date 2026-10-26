@@ -178,6 +178,7 @@ namespace SpawnControl
 		bool enabled = false;
 		int checks_per_second = 20;        // game under-mesh tests per second, each on one awake creature
 		bool remove = false;
+		bool include_stasis = false;       // also test creatures in stasis, far from any player
 		std::vector<std::string> exclude;
 	};
 
@@ -484,21 +485,24 @@ namespace SpawnControl
 			{
 				const nlohmann::json& under = section["UnderMesh"];
 				if (!under.is_object())
-					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove and Exclude; ignored");
+					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, IncludeStasis and Exclude; ignored");
 				else
 				{
 					rules.under_mesh.enabled = true;
 					const int checks = ReadInt(under, "ChecksPerSecond", rules.under_mesh.checks_per_second, 1, warnings);
-					rules.under_mesh.checks_per_second = (std::min)(checks, 200);
-					if (checks > 200)
-						warnings.push_back(where + "UnderMesh.ChecksPerSecond above 200; using 200");
+					rules.under_mesh.checks_per_second = (std::min)(checks, 1000);
+					if (checks > 1000)
+						warnings.push_back(where + "UnderMesh.ChecksPerSecond above 1000; using 1000");
 					rules.under_mesh.exclude = ReadStrings(under, "Exclude", {}, warnings, where + "UnderMesh.");
-					if (under.contains("Remove"))
+					for (const auto& [key, target] : { std::pair<const char*, bool*>{ "Remove", &rules.under_mesh.remove },
+							std::pair<const char*, bool*>{ "IncludeStasis", &rules.under_mesh.include_stasis } })
 					{
-						if (under["Remove"].is_boolean())
-							rules.under_mesh.remove = under["Remove"].get<bool>();
+						if (!under.contains(key))
+							continue;
+						if (under[key].is_boolean())
+							*target = under[key].get<bool>();
 						else
-							warnings.push_back(where + "UnderMesh.Remove must be true or false; using false");
+							warnings.push_back(where + "UnderMesh." + key + " must be true or false; using false");
 					}
 				}
 			}
@@ -598,7 +602,7 @@ namespace SpawnControl
 				if (map.contains("Overlap"))
 					WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
 				if (map.contains("UnderMesh"))
-					WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "Exclude" }, where + "UnderMesh.", warnings);
+					WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "IncludeStasis", "Exclude" }, where + "UnderMesh.", warnings);
 			}
 		}
 	}
