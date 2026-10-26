@@ -5,7 +5,8 @@
     "CensusIntervalSeconds": 60,
     "NearPlayerDistance": 10000,
     "LogRemovals": true,
-    "RefuseFullEntries": true
+    "RefuseFullEntries": true,
+    "IgnoreSummoned": true
   },
   "Protect": {
     "PathContains": [ "/Missions/" ],

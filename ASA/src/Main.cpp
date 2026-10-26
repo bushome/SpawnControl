@@ -89,6 +89,8 @@ namespace
 		size_t actors = 0;
 		size_t wild = 0;
 		size_t mission = 0;
+		size_t summoned = 0;                  // wild, summoned by another creature, outside the rules
+		std::vector<int> summoned_by_class;   // the summoned part of wild_by_class
 		std::vector<int> wild_by_class;       // every class, protected included
 		std::vector<int> mission_by_class;
 		std::vector<size_t> family_wild;      // per report family, without a mission
@@ -298,8 +300,21 @@ namespace
 	{
 		Other,    // not a wild creature: tamed, owned, dead
 		Mission,  // wild but belongs to a mission or outpost
+		Summoned, // wild but summoned by another creature (a Gloon's escort); outside the rules
 		Wild,
 	};
+
+	// Summoned by another creature: its owner or instigator is a different creature. A Gloon's Revenant
+	// escorts are; zone spawns are not. Removing an escort only makes its summoner replace it.
+	bool IsSummoned(APrimalDinoCharacter* dino)
+	{
+		UClass* dino_class = APrimalDinoCharacter::GetPrivateStaticClass();
+		AActor* owner = dino->OwnerField().Get();
+		if (owner != nullptr && owner != dino && owner->IsA(dino_class))
+			return true;
+		AActor* instigator = dino->InstigatorField().Get();
+		return instigator != nullptr && instigator != dino && instigator->IsA(dino_class);
+	}
 
 	Kind Classify(APrimalDinoCharacter* dino)
 	{
@@ -309,6 +324,8 @@ namespace
 			return Kind::Other;
 		if (dino->OwnerMissionField() != nullptr)
 			return Kind::Mission;
+		if (g_settings.ignore_summoned && IsSummoned(dino))
+			return Kind::Summoned;
 		return Kind::Wild;
 	}
 
@@ -382,15 +399,48 @@ namespace
 			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);
 
+		// A queued removal was planned under the old rules. Live counts treat queued creatures as gone,
+		// so they are counted again before the queue is dropped.
+		if (g_counts_ready)
+		{
+			for (const QueueItem& item : g_queue)
+			{
+				if (!item.refresh && item.creature.Get() != nullptr)
+					AdjustCounts(item.class_index, +1);
+			}
+		}
+		g_queue.clear();
+		g_queued.clear();
+
+		std::vector<bool> had_rule(g_classes.size(), false);
+		for (size_t c = 0; c < g_classes.size(); ++c)
+			had_rule[c] = HasAnyRule(g_classes[c].rule);
 		for (ClassEntry& entry : g_classes)
 			entry.rule = ResolveClass(g_settings, g_rules, entry.info);
 
+		// Keep enforcing through a reload: classes that were counted keep their live count, classes that
+		// just got a rule start from the last census, groups are summed from their members. The next
+		// census replaces all of it with real counts. Before the first census there is nothing to keep.
 		g_group_counts.assign(g_rules != nullptr ? g_rules->groups.size() : 0, 0);
-		g_counts_ready = false; // limits wait for the next census to have real counts
-
-		// A queued removal was planned under the old rules.
-		g_queue.clear();
-		g_queued.clear();
+		if (g_counts_ready && g_have_report)
+		{
+			g_class_counts.resize(g_classes.size(), 0);
+			for (size_t c = 0; c < g_classes.size(); ++c)
+			{
+				if (!had_rule[c] && c < g_last.wild_by_class.size())
+					g_class_counts[c] = g_last.wild_by_class[c] -
+						(c < g_last.summoned_by_class.size() ? g_last.summoned_by_class[c] : 0);
+				for (int g : g_classes[c].rule.groups)
+				{
+					if (g >= 0 && static_cast<size_t>(g) < g_group_counts.size())
+						g_group_counts[g] += g_class_counts[c];
+				}
+			}
+		}
+		else
+		{
+			g_counts_ready = false; // limits wait for the first census to have real counts
+		}
 	}
 
 	Settings LoadSettings()
@@ -615,6 +665,7 @@ namespace
 		{
 			g_building.wild_by_class.resize(g_classes.size(), 0);
 			g_building.mission_by_class.resize(g_classes.size(), 0);
+			g_building.summoned_by_class.resize(g_classes.size(), 0);
 		}
 		const ClassRule& rule = g_classes[class_index].rule;
 
@@ -631,6 +682,12 @@ namespace
 		++g_building.wild_by_class[class_index];
 		if (rule.report_family >= 0)
 			++g_building.family_wild[rule.report_family];
+		if (kind == Kind::Summoned)
+		{
+			++g_building.summoned;
+			++g_building.summoned_by_class[class_index];
+			return;
+		}
 
 		if (g_settings.refresh_hours > 0 && !rule.is_protected && !SkipsRefresh(g_settings, g_classes[class_index].info))
 		{
@@ -742,6 +799,7 @@ namespace
 		g_building.over_group = plan.over_group;
 		g_building.wild_by_class.resize(g_classes.size(), 0);
 		g_building.mission_by_class.resize(g_classes.size(), 0);
+		g_building.summoned_by_class.resize(g_classes.size(), 0);
 		g_last = g_building;
 		g_have_report = true;
 		g_census_items.clear();
@@ -749,8 +807,8 @@ namespace
 		PlanRefreshFromCensus();
 
 		if (plan.remove.size() > 0)
-			Log::GetLog()->info("Census: {} wild, {} mission; {} over the rules ({} blocked, {} over limit, {} over group), "
-				"{} newly queued, queue {}", g_last.wild, g_last.mission, plan.remove.size(), plan.blocked, plan.over_limit,
+			Log::GetLog()->info("Census: {} wild ({} summoned), {} mission; {} over the rules ({} blocked, {} over limit, {} over group), "
+				"{} newly queued, queue {}", g_last.wild, g_last.summoned, g_last.mission, plan.remove.size(), plan.blocked, plan.over_limit,
 				plan.over_group, newly_queued, g_queue.size());
 	}
 
@@ -983,7 +1041,10 @@ namespace
 		out << "Census " << static_cast<int>(age) << " s ago (" << std::fixed;
 		out.precision(1);
 		out << g_last.seconds << " s, " << g_last.actors << " actors): " << g_last.wild << " wild, "
-			<< g_last.mission << " mission-owned\n";
+			<< g_last.mission << " mission-owned";
+		if (g_last.summoned > 0)
+			out << ", " << g_last.summoned << " of the wild summoned by another creature (not limited)";
+		out << "\n";
 		out << "Queue " << g_queue.size() << ", removed " << g_removed_total << " (skipped " << g_removed_skipped
 			<< "), spawn check avg " << (g_hook_calls > 0 ? g_hook_total_us / g_hook_calls : 0.0) << " us, max "
 			<< g_hook_max_us << " us\n";
@@ -1009,6 +1070,8 @@ namespace
 				out << "  " << entry.info.short_name << ": " << g_last.wild_by_class[c] << " wild";
 				if (g_last.mission_by_class[c] > 0)
 					out << ", " << g_last.mission_by_class[c] << " mission";
+				if (g_last.summoned_by_class[c] > 0)
+					out << " (" << g_last.summoned_by_class[c] << " of them summoned)";
 				if (entry.rule.is_protected)
 					out << " [protected]";
 				if (entry.rule.blocked)
@@ -1044,7 +1107,15 @@ namespace
 					if (std::find(member_of.begin(), member_of.end(), static_cast<int>(g)) != member_of.end())
 						total += count_now(c);
 				}
-				out << "  group " << g_rules->groups[g].name << ": " << total << " / " << g_rules->groups[g].max << "\n";
+				out << "  group " << g_rules->groups[g].name << ": " << total << " / " << g_rules->groups[g].max;
+				std::string members;
+				for (size_t c = 0; c < g_classes.size() && c < g_last.wild_by_class.size(); ++c)
+				{
+					const auto& member_of = g_classes[c].rule.groups;
+					if (std::find(member_of.begin(), member_of.end(), static_cast<int>(g)) != member_of.end())
+						members += (members.empty() ? "" : ", ") + g_classes[c].info.short_name + " " + std::to_string(count_now(c));
+				}
+				out << " (" << members << ")\n";
 			}
 		}
 		for (size_t f = 0; f < g_settings.report_families.size() && f < g_last.family_wild.size(); ++f)

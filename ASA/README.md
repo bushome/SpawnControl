@@ -105,6 +105,7 @@ Comments are allowed. `configs\config.commented.json` has the same values with e
 | `CensusIntervalSeconds` | 60 | Seconds between census passes. |
 | `NearPlayerDistance` | 10000 | Unreal units (300 = one foundation). Queued creatures closer than this to a player wait. |
 | `RefuseFullEntries` | true | Let zones skip spawn entries whose creatures are all blocked or at their limit. |
+| `IgnoreSummoned` | true | Leave creatures summoned by another creature (escorts whose owner or instigator is a creature) out of every rule. They are counted in the census and shown in `List`. Limit the summoner instead. |
 | `LogRemovals` | true | Once a minute, log how many creatures were removed and how many zone spawn entries were refused, by class. Once a class is at its limit, this shows how hard the zones still push for it. |
 
 ### Protect
@@ -160,8 +161,8 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 
 | Command | What it does |
 |---|---|
-| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class and every group with its count now (the last census minus what it queued for removal, plus spawns since), the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
-| `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. |
+| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class and every group with its count now and each member's count (the last census minus what it queued for removal, plus spawns since), the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
+| `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. Live counts carry over, so limits keep holding without waiting for a census: classes that already had a rule keep their count, newly ruled classes start from the last census. |
 
 ## Troubleshooting
 

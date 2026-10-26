@@ -15,7 +15,10 @@
     "LogRemovals": true,
     // Zones choosing what to spawn skip entries whose creatures are all blocked or at their limit, so they
     // spawn other species instead of creatures that would only be removed again.
-    "RefuseFullEntries": true
+    "RefuseFullEntries": true,
+    // Creatures summoned by another creature (a Gloon's Revenant escorts) are counted but never limited or
+    // removed: the summoner would only replace them. Limit the summoner instead.
+    "IgnoreSummoned": true
   },
 
   // Never touched by blocks or limits, on every map.

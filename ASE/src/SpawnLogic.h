@@ -128,6 +128,7 @@ namespace SpawnControl
 		double near_player_distance = 10000.0; // creatures closer than this to a player are removed last
 		bool log_removals = true;
 		bool refuse_full_entries = true;       // zones skip spawn entries whose creatures are all at their limit
+		bool ignore_summoned = true;           // creatures another creature summoned (escorts) are outside the rules
 
 		std::vector<std::string> protected_paths{ "/Missions/" };
 		std::vector<std::string> protected_families;
@@ -273,7 +274,8 @@ namespace SpawnControl
 		settings.census_interval_seconds = detail::ReadInt(general, "CensusIntervalSeconds", settings.census_interval_seconds, 5, warnings);
 		settings.near_player_distance = detail::ReadInt(general, "NearPlayerDistance", static_cast<int>(settings.near_player_distance), 0, warnings);
 		for (const auto& [key, target] : { std::pair<const char*, bool*>{ "LogRemovals", &settings.log_removals },
-				std::pair<const char*, bool*>{ "RefuseFullEntries", &settings.refuse_full_entries } })
+				std::pair<const char*, bool*>{ "RefuseFullEntries", &settings.refuse_full_entries },
+				std::pair<const char*, bool*>{ "IgnoreSummoned", &settings.ignore_summoned } })
 		{
 			if (!general.is_object() || !general.contains(key))
 				continue;

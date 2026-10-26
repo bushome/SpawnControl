@@ -92,6 +92,8 @@ static void TestParsing()
 	CHECK(defaults.warnings.empty());
 	CHECK(defaults.removals_per_tick == 10);
 	CHECK(defaults.refuse_full_entries);
+	CHECK(defaults.ignore_summoned);
+	CHECK(!Parse(R"({ "General": { "IgnoreSummoned": false } })").ignore_summoned);
 	CHECK(defaults.protected_paths.size() == 1 && defaults.protected_paths[0] == "/Missions/");
 	CHECK(defaults.maps.empty());
 
@@ -322,6 +324,7 @@ static void TestConfigFile(const std::string& path, bool shipped_expectations)
 	CHECK(settings.near_player_distance == 10000.0);
 	CHECK(settings.log_removals);
 	CHECK(settings.refuse_full_entries);
+	CHECK(settings.ignore_summoned);
 	CHECK(settings.protected_paths.size() == 1 && settings.protected_paths[0] == "/Missions/");
 	CHECK(settings.protected_families.empty());
 	CHECK(settings.report_families.size() == 1 && settings.report_families[0].base_class == "Thrall_Character_BP_Base_C");
