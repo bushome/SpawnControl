@@ -370,6 +370,8 @@ namespace
 	}
 
 	// Picks the map section and re-resolves every known class against it.
+	void AdjustCounts(int class_index, int delta);
+
 	void ApplyRules()
 	{
 		g_map_name = CurrentMapName();
@@ -403,7 +405,7 @@ namespace
 		// so they are counted again before the queue is dropped.
 		if (g_counts_ready)
 		{
-			for (const QueueItem& item : g_queue)
+			for (QueueItem& item : g_queue)
 			{
 				if (!item.refresh && item.creature.Get() != nullptr)
 					AdjustCounts(item.class_index, +1);
