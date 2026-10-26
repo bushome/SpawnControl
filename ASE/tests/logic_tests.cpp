@@ -287,6 +287,8 @@ static void TestDensity()
 	add(0, 50000, 0, 1); add(0, 0, 50000, 1); add(1, -50000, 0, 1);  // ids 10-12, alone
 	const Plan plan = PlanRemovals(rules, {}, creatures, density);
 	CHECK(plan.too_dense == 6);                    // the clump ends at 4
+	CHECK(plan.hotspots.size() == 1 && plan.hotspots[0].count == 10);
+	CHECK(plan.hotspots[0].x == 45 && plan.hotspots[0].classes.size() == 2 && plan.hotspots[0].classes[0].first == 5);
 	CHECK(plan.class_counts[0] + plan.class_counts[1] == 7);
 	for (size_t id : plan.remove)
 		CHECK(id < 10);                            // strays never touched

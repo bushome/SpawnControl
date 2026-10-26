@@ -100,6 +100,7 @@ namespace
 		size_t mission = 0;
 		size_t summoned = 0;                  // wild, summoned by another creature, outside the rules
 		size_t too_dense = 0;                 // planned by density rules
+		std::vector<DensityHotspot> hotspots; // fullest cube per density rule
 		std::vector<int> summoned_by_class;   // the summoned part of wild_by_class
 		std::vector<int> wild_by_class;       // every class, protected included
 		std::vector<int> mission_by_class;
@@ -847,6 +848,7 @@ namespace
 		g_building.over_limit = plan.over_limit;
 		g_building.over_group = plan.over_group;
 		g_building.too_dense = plan.too_dense;
+		g_building.hotspots = plan.hotspots;
 		g_building.wild_by_class.resize(g_classes.size(), 0);
 		g_building.mission_by_class.resize(g_classes.size(), 0);
 		g_building.summoned_by_class.resize(g_classes.size(), 0);
@@ -1190,9 +1192,25 @@ namespace
 				}
 				out << " (" << members << ")\n";
 			}
-			for (const DensityRule& rule : g_rules->density)
+			for (size_t d = 0; d < g_rules->density.size(); ++d)
+			{
+				const DensityRule& rule = g_rules->density[d];
 				out << "  density " << rule.name << ": max " << rule.max << " per " << static_cast<int>(rule.size / kFoundation)
 					<< " foundations" << (rule.exclude.empty() ? "" : ", with exclusions") << "\n";
+				if (d < g_last.hotspots.size() && g_last.hotspots[d].count > 0)
+				{
+					const DensityHotspot& spot = g_last.hotspots[d];
+					out << "    fullest cube last census: " << spot.count << " at " << static_cast<int>(spot.x) << " "
+						<< static_cast<int>(spot.y) << " " << static_cast<int>(spot.z) << " (";
+					for (size_t k = 0; k < spot.classes.size() && k < 4; ++k)
+					{
+						const int c = spot.classes[k].second;
+						out << (k == 0 ? "" : ", ") << spot.classes[k].first << " "
+							<< (c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"));
+					}
+					out << (spot.classes.size() > 4 ? ", ...)" : ")") << "\n";
+				}
+			}
 			if (!g_rules->density.empty())
 			{
 				out << "  density skips: caves " << (g_rules->density_skip.caves ? "on" : "off") << " (no cave flag on ASE; use Areas)";

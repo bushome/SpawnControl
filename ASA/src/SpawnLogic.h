@@ -587,6 +587,14 @@ namespace SpawnControl
 		return false;
 	}
 
+	// The fullest cube a density rule found before thinning, for tuning Max.
+	struct DensityHotspot
+	{
+		int count = 0;
+		double x = 0, y = 0, z = 0;          // average position of the creatures in it
+		std::vector<std::pair<int, int>> classes;  // (count, class index), largest first
+	};
+
 	struct Plan
 	{
 		std::vector<size_t> remove;               // ids, in the order to remove them
@@ -596,6 +604,7 @@ namespace SpawnControl
 		size_t over_limit = 0;
 		size_t over_group = 0;
 		size_t too_dense = 0;
+		std::vector<DensityHotspot> hotspots;     // one per density rule
 	};
 
 	// Which creatures to remove so every block, limit and group limit holds. Blocked creatures come
@@ -708,9 +717,11 @@ namespace SpawnControl
 			for (size_t i = 0; i < creatures.size(); ++i)
 				skips_density[i] = SkipsDensity(skip, creatures[i]);
 		}
+		plan.hotspots.resize(density.size());
 		for (size_t d = 0; d < density.size(); ++d)
 		{
 			const DensityRule& rule = density[d];
+			DensityHotspot& hotspot = plan.hotspots[d];
 			std::vector<size_t> members;
 			for (size_t i = 0; i < creatures.size(); ++i)
 			{
@@ -748,6 +759,23 @@ namespace SpawnControl
 				}
 				for (auto& [key, list] : cells)
 				{
+					if (static_cast<int>(list.size()) > hotspot.count)
+					{
+						hotspot.count = static_cast<int>(list.size());
+						hotspot.x = hotspot.y = hotspot.z = 0;
+						std::map<int, int> by_class;
+						for (size_t i : list)
+						{
+							hotspot.x += creatures[i].x / list.size();
+							hotspot.y += creatures[i].y / list.size();
+							hotspot.z += creatures[i].z / list.size();
+							++by_class[creatures[i].class_index];
+						}
+						hotspot.classes.clear();
+						for (const auto& [c, n] : by_class)
+							hotspot.classes.emplace_back(n, c);
+						std::sort(hotspot.classes.rbegin(), hotspot.classes.rend());
+					}
 					if (list.size() <= static_cast<size_t>(rule.max))
 						continue;
 					std::stable_sort(list.begin(), list.end(), [&](size_t a, size_t b)
