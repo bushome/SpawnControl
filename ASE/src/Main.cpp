@@ -1142,6 +1142,16 @@ namespace
 				if (entry.rule.limit != kNoLimit)
 					out << " [limit " << entry.rule.limit << "]";
 				out << "\n    " << entry.info.path << "\n";
+				// Parent classes up to the base creature class, for Exclude and Protect.Families entries.
+				std::string parents;
+				for (size_t p = 1; p < entry.info.chain.size(); ++p)
+				{
+					parents += (parents.empty() ? "" : " > ") + entry.info.chain[p];
+					if (entry.info.chain[p] == "PrimalDinoCharacter")
+						break;
+				}
+				if (!parents.empty())
+					out << "    parents: " << parents << "\n";
 			}
 			return out.str();
 		}
