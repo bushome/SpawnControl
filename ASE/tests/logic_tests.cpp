@@ -413,6 +413,72 @@ static void TestBlockAreas()
 	CHECK(skip.maps.front().density_skip.areas.size() == 1 && skip.maps.front().density_skip.areas[0].y == 6);
 }
 
+static void TestOverlap()
+{
+	const Settings parsed = Parse(R"({ "Maps": { "M": { "Overlap": { "Fraction": 0.6, "Exclude": [ "Thrall_Character_BP_Base_C" ] } },
+		"N": { "Overlap": { "Fraction": 5 } }, "O": {} } })");
+	CHECK(parsed.maps.size() == 3);
+	CHECK(parsed.maps[0].overlap.enabled && parsed.maps[0].overlap.fraction == 0.6 && parsed.maps[0].overlap.exclude.size() == 1);
+	CHECK(parsed.maps[1].overlap.enabled && parsed.maps[1].overlap.fraction == 0.5);
+	CHECK(!parsed.maps[2].overlap.enabled);
+	CHECK(parsed.warnings.size() == 1);
+
+	Settings settings;
+	ClassInfo raptor;
+	raptor.short_name = "Raptor_C";
+	raptor.path = "/Game/Raptor.Raptor_C";
+	raptor.chain = { "Raptor_C", "PrimalDinoCharacter" };
+	ClassInfo thrall;
+	thrall.short_name = "Thrall_Archer_C";
+	thrall.path = "/Game/Thrall_Archer.Thrall_Archer_C";
+	thrall.chain = { "Thrall_Archer_C", "Thrall_Character_BP_Base_C", "PrimalDinoCharacter" };
+	const ClassRule raptor_rule = ResolveClass(settings, &parsed.maps[0], raptor);
+	CHECK(raptor_rule.overlap && HasAnyRule(raptor_rule));
+	CHECK(!ResolveClass(settings, &parsed.maps[0], thrall).overlap);
+	CHECK(!ResolveClass(settings, &parsed.maps[2], raptor).overlap);
+
+	// Three raptors stacked on one spot, one a little apart, one far away; radius 100, fraction 0.5:
+	// overlapping means centres closer than 100.
+	std::vector<ClassRule> rules(2);
+	rules[0].overlap = true;
+	std::vector<Creature> creatures;
+	auto add = [&](int cls, double x, double distance, bool attached = false)
+		{
+			Creature c;
+			c.id = creatures.size();
+			c.class_index = cls;
+			c.x = x;
+			c.radius = 100;
+			c.player_distance = distance;
+			c.attached = attached;
+			creatures.push_back(c);
+		};
+	add(0, 0, 500); add(0, 10, 100); add(0, 20, 900);   // ids 0-2: one stack
+	add(0, 150, 300);                                   // id 3: touching, not inside
+	add(0, 9000, 50);                                   // id 4: alone
+	add(0, 5, 10, true);                                // id 5: a rider, ignored
+	add(1, 0, 1);                                       // id 6: class without the rule
+	const Plan plan = PlanRemovals(rules, {}, creatures);
+	CHECK(plan.overlapping == 2);
+	CHECK(std::find(plan.remove.begin(), plan.remove.end(), size_t(1)) == plan.remove.end()); // nearest a player stays
+	CHECK(std::find(plan.remove.begin(), plan.remove.end(), size_t(0)) != plan.remove.end());
+	CHECK(std::find(plan.remove.begin(), plan.remove.end(), size_t(2)) != plan.remove.end());
+	CHECK(plan.overlap_samples.size() == 2 && plan.overlap_samples[0].removed_class == 0);
+	CHECK(plan.class_counts[0] == 4);                  // 6 creatures of class 0 less the 2 removed
+
+	// A large creature reaches into a neighbouring cell: radius 1000 next to radius 100, 400 apart.
+	std::vector<Creature> mixed;
+	Creature big; big.id = 0; big.class_index = 0; big.radius = 1000; big.player_distance = 1; mixed.push_back(big);
+	Creature small; small.id = 1; small.class_index = 0; small.radius = 100; small.x = 400; small.player_distance = 2; mixed.push_back(small);
+	CHECK(PlanRemovals(rules, {}, mixed).overlapping == 1);
+	CHECK(PlanRemovals(rules, {}, mixed, {}, {}, 0.3).overlapping == 0); // 400 > 1100 * 0.3
+
+	// Overlap removals count before limits, so a limit does not also take a creature that was not stacked.
+	rules[0].limit = 4;
+	const Plan both = PlanRemovals(rules, {}, creatures);
+	CHECK(both.overlapping == 2 && both.over_limit == 0);
+}
+
 static void TestOverOnSpawn()
 {
 	std::vector<GroupRule> groups(1);
@@ -543,6 +609,7 @@ int main(int argc, char** argv)
 	TestPlan();
 	TestDensity();
 	TestBlockAreas();
+	TestOverlap();
 	TestOverOnSpawn();
 	TestIsFull();
 	TestRefresh();

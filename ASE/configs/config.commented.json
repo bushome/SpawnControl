@@ -122,6 +122,13 @@
       // puts 3 creatures inside and none anywhere else has its spawn entries refused from then on, so it
       // stops spawning instead of refilling. With [x, y, z] the area is a sphere, so the ground above an
       // underground spot is untouched; with [x, y] it is a column at any height.
+      // Creatures spawned inside one another: two overlap when their centres are closer than Fraction of
+      // their summed collision radii. The one nearest a player stays, the rest are removed. Riders and
+      // carried creatures are never counted. Leave the key out to turn this off.
+      "Overlap": {
+        "Fraction": 0.5,
+        "Exclude": [ "Thrall_Character_BP_Base_C" ]
+      },
       "BlockAreas": [
         { "Name": "Misplaced spawner", "Location": [ 0, 0, -60000 ], "RadiusInFoundations": 30 }
       ]

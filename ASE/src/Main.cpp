@@ -91,6 +91,8 @@ namespace
 		double x = 0, y = 0, z = 0;
 		bool in_cave = false;
 		bool in_block_area = false;
+		double radius = 0;
+		bool attached = false;
 	};
 
 	struct Report
@@ -103,6 +105,8 @@ namespace
 		size_t summoned = 0;                  // wild, summoned by another creature, outside the rules
 		size_t too_dense = 0;                 // planned by density rules
 		size_t in_block_area = 0;             // planned because they are inside a block area
+		size_t overlapping = 0;               // planned because they sit inside another creature
+		std::vector<OverlapSample> overlap_samples;
 		std::vector<std::vector<DensityHotspot>> hotspots; // fullest cubes per density rule
 		std::vector<int> summoned_by_class;   // the summoned part of wild_by_class
 		std::vector<int> wild_by_class;       // every class, protected included
@@ -781,6 +785,17 @@ namespace
 		item.y = static_cast<double>(location.Y);
 		item.z = static_cast<double>(location.Z);
 		item.in_block_area = in_block_area;
+		if (rule.overlap)
+		{
+			// The root component is the collision capsule; its bounds' horizontal extent is the radius.
+			// FBoxSphereBounds is { FVector Origin; FVector BoxExtent; float SphereRadius; } in floats.
+			if (USceneComponent* root = dino->RootComponentField())
+			{
+				const float* bounds = reinterpret_cast<const float*>(&root->BoundsField());
+				item.radius = (std::max)(static_cast<double>(bounds[3]), static_cast<double>(bounds[4]));
+				item.attached = root->AttachParentField() != nullptr;
+			}
+		}
 		g_census_items.push_back(item);
 	}
 
@@ -837,7 +852,8 @@ namespace
 		for (size_t i = 0; i < g_census_items.size(); ++i)
 		{
 			const CensusItem& item = g_census_items[i];
-			creatures.push_back({ i, item.class_index, item.player_distance, item.x, item.y, item.z, item.in_cave, item.in_block_area });
+			creatures.push_back({ i, item.class_index, item.player_distance, item.x, item.y, item.z, item.in_cave, item.in_block_area,
+				item.radius, item.attached });
 		}
 
 		static const std::vector<GroupRule> no_groups;
@@ -846,7 +862,8 @@ namespace
 		const std::vector<DensityRule>& density = g_rules != nullptr ? g_rules->density : no_density;
 		static const DensitySkip default_skip;
 		const DensitySkip& skip = g_rules != nullptr ? g_rules->density_skip : default_skip;
-		const Plan plan = PlanRemovals(rules, groups, creatures, density, skip);
+		const double overlap_fraction = g_rules != nullptr ? g_rules->overlap.fraction : 0.5;
+		const Plan plan = PlanRemovals(rules, groups, creatures, density, skip, overlap_fraction);
 
 		// Live counts start from what each rule leaves after the planned removals.
 		g_class_counts.assign(g_classes.size(), 0);
@@ -882,6 +899,8 @@ namespace
 		g_building.over_group = plan.over_group;
 		g_building.too_dense = plan.too_dense;
 		g_building.in_block_area = plan.in_block_area;
+		g_building.overlapping = plan.overlapping;
+		g_building.overlap_samples = plan.overlap_samples;
 		g_building.hotspots = plan.hotspots;
 		g_building.wild_by_class.resize(g_classes.size(), 0);
 		g_building.mission_by_class.resize(g_classes.size(), 0);
@@ -894,8 +913,9 @@ namespace
 
 		if (plan.remove.size() > 0)
 			Log::GetLog()->info("Census: {} wild ({} summoned), {} mission; {} over the rules ({} blocked, {} over limit, {} over group, "
-				"{} too dense), {} newly queued, queue {}", g_last.wild, g_last.summoned, g_last.mission, plan.remove.size(),
-				plan.blocked, plan.over_limit, plan.over_group, plan.too_dense, newly_queued, g_queue.size());
+				"{} too dense, {} overlapping, {} in block areas), {} newly queued, queue {}", g_last.wild, g_last.summoned, g_last.mission,
+				plan.remove.size(), plan.blocked, plan.over_limit, plan.over_group, plan.too_dense, plan.overlapping, plan.in_block_area,
+				newly_queued, g_queue.size());
 	}
 
 	// One slice of the census: up to CensusActorsPerTick level actors.
@@ -1354,6 +1374,16 @@ namespace
 					if (stats.stopped)
 						out << "    stopped: " << ObjectName(zone) << " (" << stats.inside << " spawned into " << stats.area << ")\n";
 				}
+			}
+			if (g_rules->overlap.enabled)
+			{
+				out << "  overlap: inside another creature when closer than " << g_rules->overlap.fraction
+					<< " of their summed radii" << (g_rules->overlap.exclude.empty() ? "" : ", with exclusions")
+					<< "; " << g_last.overlapping << " found by the last census\n";
+				auto name = [](int c) { return c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"); };
+				for (const OverlapSample& sample : g_last.overlap_samples)
+					out << "    " << name(sample.removed_class) << " inside " << name(sample.kept_class) << " at "
+						<< static_cast<int>(sample.x) << " " << static_cast<int>(sample.y) << " " << static_cast<int>(sample.z) << "\n";
 			}
 		}
 		for (size_t f = 0; f < g_settings.report_families.size() && f < g_last.family_wild.size(); ++f)

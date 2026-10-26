@@ -161,6 +161,15 @@ namespace SpawnControl
 		return spawned_inside >= kZoneStopAfter && spawned_outside == 0;
 	}
 
+	// Creatures spawned inside one another: two overlap when their centres are closer than Fraction of
+	// their summed collision radii. One of each overlapping set stays.
+	struct OverlapRule
+	{
+		bool enabled = false;
+		double fraction = 0.5;
+		std::vector<std::string> exclude;
+	};
+
 	struct DensitySkip
 	{
 		bool caves = true;                 // creatures the game spawned in a cave or boss area
@@ -176,6 +185,7 @@ namespace SpawnControl
 		std::vector<DensityRule> density;
 		DensitySkip density_skip;
 		std::vector<BlockArea> block_areas;
+		OverlapRule overlap;
 	};
 
 	struct ReportFamily
@@ -419,6 +429,27 @@ namespace SpawnControl
 				}
 			}
 
+			if (section.contains("Overlap"))
+			{
+				const nlohmann::json& overlap = section["Overlap"];
+				const std::string overlap_where = where + "Overlap.";
+				if (!overlap.is_object())
+					warnings.push_back(where + "Overlap must be an object with Fraction and Exclude; ignored");
+				else
+				{
+					rules.overlap.enabled = true;
+					if (overlap.contains("Fraction"))
+					{
+						const nlohmann::json& fraction = overlap["Fraction"];
+						if (fraction.is_number() && fraction.get<double>() >= 0.1 && fraction.get<double>() <= 1.0)
+							rules.overlap.fraction = fraction.get<double>();
+						else
+							warnings.push_back(overlap_where + "Fraction must be a number from 0.1 to 1; using 0.5");
+					}
+					rules.overlap.exclude = ReadStrings(overlap, "Exclude", {}, warnings, overlap_where);
+				}
+			}
+
 			if (section.contains("BlockAreas"))
 				rules.block_areas = ReadAreas(section["BlockAreas"], where + "BlockAreas", warnings);
 			return rules;
@@ -528,6 +559,7 @@ namespace SpawnControl
 		int limit = kNoLimit;
 		std::vector<int> groups;   // indices into MapRules::groups
 		std::vector<int> density;  // indices into MapRules::density
+		bool overlap = false;      // checked for spawning inside other creatures
 		int report_family = -1;    // index into Settings::report_families
 	};
 
@@ -543,6 +575,18 @@ namespace SpawnControl
 
 	// Resolves every rule for one class. A full-path Limit beats a short-name Limit for the same class,
 	// so one same-named class from a mod can be treated differently. rules may be nullptr (no section).
+	// An Exclude list: a short name matches the class or any class derived from it, an entry starting with
+	// "/" any class whose path contains it.
+	inline bool ExcludedBy(const std::vector<std::string>& keys, const ClassInfo& info)
+	{
+		for (const std::string& key : keys)
+		{
+			if (IsPathKey(key) ? ContainsNoCase(info.path, key) : KeyMatches(key, info) || ChainContains(info, key))
+				return true;
+		}
+		return false;
+	}
+
 	inline ClassRule ResolveClass(const Settings& settings, const MapRules* rules, const ClassInfo& info)
 	{
 		ClassRule rule;
@@ -594,17 +638,17 @@ namespace SpawnControl
 			bool member = rules->density[d].all;
 			for (const std::string& key : rules->density[d].classes)
 				member = member || KeyMatches(key, info);
-			for (const std::string& key : rules->density[d].exclude)
-				member = member && !(IsPathKey(key) ? ContainsNoCase(info.path, key) : KeyMatches(key, info) || ChainContains(info, key));
-			if (member)
+			if (member && !ExcludedBy(rules->density[d].exclude, info))
 				rule.density.push_back(static_cast<int>(d));
 		}
+
+		rule.overlap = rules->overlap.enabled && !ExcludedBy(rules->overlap.exclude, info);
 		return rule;
 	}
 
 	inline bool HasAnyRule(const ClassRule& rule)
 	{
-		return rule.blocked || rule.limit != kNoLimit || !rule.groups.empty() || !rule.density.empty();
+		return rule.blocked || rule.limit != kNoLimit || !rule.groups.empty() || !rule.density.empty() || rule.overlap;
 	}
 
 	// ------------------------------------------------------------------------------------------
@@ -620,7 +664,17 @@ namespace SpawnControl
 		double x = 0, y = 0, z = 0;  // where it is, for density rules
 		bool in_cave = false;        // the game spawned it in a cave or boss area
 		bool in_block_area = false;  // inside a block area: removed whatever its class
+		double radius = 0;           // collision radius; 0 = unknown, never counted as overlapping
+		bool attached = false;       // riding or carried: sits inside another creature on purpose
 	};
+
+	struct OverlapSample
+	{
+		double x = 0, y = 0, z = 0;
+		int removed_class = -1;
+		int kept_class = -1;
+	};
+	constexpr size_t kOverlapSamples = 10;
 
 	inline bool SkipsDensity(const DensitySkip& skip, const Creature& creature)
 	{
@@ -655,6 +709,8 @@ namespace SpawnControl
 		size_t over_group = 0;
 		size_t too_dense = 0;
 		size_t in_block_area = 0;
+		size_t overlapping = 0;
+		std::vector<OverlapSample> overlap_samples;  // a few of them, for finding where it happens
 		std::vector<std::vector<DensityHotspot>> hotspots;  // per density rule, fullest first
 	};
 
@@ -667,7 +723,8 @@ namespace SpawnControl
 	// more than Max of a rule's classes. Checked on two grids, the second shifted by half a cube, so a
 	// clump on a cube edge is still caught; the farthest from players in an over-full cube go first.
 	inline Plan PlanRemovals(const std::vector<ClassRule>& rules, const std::vector<GroupRule>& groups,
-		const std::vector<Creature>& creatures, const std::vector<DensityRule>& density = {}, const DensitySkip& skip = {})
+		const std::vector<Creature>& creatures, const std::vector<DensityRule>& density = {}, const DensitySkip& skip = {},
+		double overlap_fraction = 0.5)
 	{
 		Plan plan;
 		plan.class_counts.assign(rules.size(), 0);
@@ -678,6 +735,81 @@ namespace SpawnControl
 		// Per class: what is still unpicked, farthest from players first (ties keep census order).
 		// Creatures inside a block area go first, whatever their class, and are not counted.
 		std::vector<bool> removed(creatures.size(), false);
+
+		// Overlap: walk from the creature nearest a player outwards; one that sits inside a creature already
+		// kept goes, so of each stack the one most likely in view stays and the rest are removed.
+		{
+			std::vector<size_t> order;
+			double largest = 0;
+			for (size_t i = 0; i < creatures.size(); ++i)
+			{
+				const Creature& c = creatures[i];
+				if (c.class_index < 0 || static_cast<size_t>(c.class_index) >= rules.size() || rules[c.class_index].is_protected ||
+					!rules[c.class_index].overlap || c.in_block_area || c.attached || c.radius <= 0)
+					continue;
+				order.push_back(i);
+				largest = (std::max)(largest, c.radius);
+			}
+			if (order.size() >= 2)
+			{
+				// Overlapping pairs, found by sweeping along x: only creatures within reach on x can overlap.
+				std::vector<size_t> by_x(order.size());
+				for (size_t k = 0; k < order.size(); ++k)
+					by_x[k] = k;
+				std::sort(by_x.begin(), by_x.end(), [&](size_t a, size_t b) { return creatures[order[a]].x < creatures[order[b]].x; });
+				const double reach = 2 * largest * overlap_fraction;
+				std::vector<std::vector<size_t>> touching(order.size());
+				for (size_t a = 0; a < by_x.size(); ++a)
+				{
+					const Creature& c = creatures[order[by_x[a]]];
+					for (size_t b = a + 1; b < by_x.size(); ++b)
+					{
+						const Creature& o = creatures[order[by_x[b]]];
+						if (o.x - c.x >= reach)
+							break;
+						const double ex = c.x - o.x, ey = c.y - o.y, ez = c.z - o.z;
+						const double near = (c.radius + o.radius) * overlap_fraction;
+						if (ex * ex + ey * ey + ez * ez < near * near)
+						{
+							touching[by_x[a]].push_back(by_x[b]);
+							touching[by_x[b]].push_back(by_x[a]);
+						}
+					}
+				}
+
+				// Nearest a player first; one touching a creature already kept goes.
+				std::vector<size_t> by_player(order.size());
+				for (size_t k = 0; k < order.size(); ++k)
+					by_player[k] = k;
+				std::stable_sort(by_player.begin(), by_player.end(),
+					[&](size_t a, size_t b) { return creatures[order[a]].player_distance < creatures[order[b]].player_distance; });
+				std::vector<bool> kept(order.size(), false);
+				for (size_t k : by_player)
+				{
+					const Creature* inside = nullptr;
+					for (size_t t : touching[k])
+					{
+						if (kept[t])
+						{
+							inside = &creatures[order[t]];
+							break;
+						}
+					}
+					if (inside == nullptr)
+					{
+						kept[k] = true;
+						continue;
+					}
+					const Creature& c = creatures[order[k]];
+					removed[order[k]] = true;
+					plan.remove.push_back(c.id);
+					++plan.overlapping;
+					if (plan.overlap_samples.size() < kOverlapSamples)
+						plan.overlap_samples.push_back({ c.x, c.y, c.z, c.class_index, inside->class_index });
+				}
+			}
+		}
+
 		std::vector<std::vector<const Creature*>> remaining(rules.size());
 		for (size_t i = 0; i < creatures.size(); ++i)
 		{
@@ -685,7 +817,7 @@ namespace SpawnControl
 			if (creature.class_index < 0 || static_cast<size_t>(creature.class_index) >= rules.size())
 				continue;
 			const ClassRule& rule = rules[creature.class_index];
-			if (rule.is_protected)
+			if (rule.is_protected || removed[i])
 				continue;
 			if (creature.in_block_area)
 			{
@@ -815,43 +947,61 @@ namespace SpawnControl
 				};
 			for (const double shift : { 0.0, rule.size / 2 })
 			{
-				std::unordered_map<uint64_t, std::vector<size_t>> cells;
+				// Cells by sorting (cell, creature) pairs: one run per cell.
+				std::vector<std::pair<uint64_t, size_t>> keyed;
+				keyed.reserve(members.size());
 				for (size_t i : members)
 				{
 					if (removed[i])
 						continue;
 					const Creature& c = creatures[i];
-					cells[key3(cell_key(c.x, rule.size, shift), cell_key(c.y, rule.size, shift), cell_key(c.z, rule.size, shift))].push_back(i);
+					keyed.emplace_back(key3(cell_key(c.x, rule.size, shift), cell_key(c.y, rule.size, shift), cell_key(c.z, rule.size, shift)), i);
 				}
-				// The fullest cells of this pass, before thinning.
-				std::vector<std::pair<size_t, const std::vector<size_t>*>> fullest;
-				for (const auto& [key, list] : cells)
+				std::sort(keyed.begin(), keyed.end());
+				std::vector<std::pair<size_t, size_t>> runs; // (start, size) of every cell with 2 or more
+				for (size_t start = 0; start < keyed.size();)
 				{
-					if (list.size() >= 2)
-						fullest.emplace_back(list.size(), &list);
+					size_t end = start + 1;
+					while (end < keyed.size() && keyed[end].first == keyed[start].first)
+						++end;
+					if (end - start >= 2)
+						runs.emplace_back(start, end - start);
+					start = end;
 				}
+				auto run_list = [&](const std::pair<size_t, size_t>& run)
+					{
+						std::vector<size_t> list(run.second);
+						for (size_t k = 0; k < run.second; ++k)
+							list[k] = keyed[run.first + k].second;
+						return list;
+					};
+
+				// The fullest cells of this pass, before thinning.
+				std::vector<size_t> fullest(runs.size());
+				for (size_t r = 0; r < runs.size(); ++r)
+					fullest[r] = r;
 				const size_t keep = (std::min)(fullest.size(), kHotspotsPerRule * 4);
 				std::partial_sort(fullest.begin(), fullest.begin() + keep, fullest.end(),
-					[](const auto& a, const auto& b) { return a.first > b.first; });
+					[&](size_t a, size_t b) { return runs[a].second > runs[b].second; });
 				for (size_t f = 0; f < keep; ++f)
 				{
-					const std::vector<size_t>& list = *fullest[f].second;
 					Candidate candidate;
-					candidate.count = static_cast<int>(list.size());
-					for (size_t i : list)
+					candidate.list = run_list(runs[fullest[f]]);
+					candidate.count = static_cast<int>(candidate.list.size());
+					for (size_t i : candidate.list)
 					{
-						candidate.x += creatures[i].x / list.size();
-						candidate.y += creatures[i].y / list.size();
-						candidate.z += creatures[i].z / list.size();
+						candidate.x += creatures[i].x / candidate.list.size();
+						candidate.y += creatures[i].y / candidate.list.size();
+						candidate.z += creatures[i].z / candidate.list.size();
 					}
-					candidate.list = list;
 					candidates.push_back(std::move(candidate));
 				}
 
-				for (auto& [key, list] : cells)
+				for (const auto& run : runs)
 				{
-					if (list.size() <= static_cast<size_t>(rule.max))
+					if (run.second <= static_cast<size_t>(rule.max))
 						continue;
+					std::vector<size_t> list = run_list(run);
 					std::stable_sort(list.begin(), list.end(), [&](size_t a, size_t b)
 						{
 							return creatures[a].player_distance > creatures[b].player_distance;
