@@ -778,8 +778,9 @@ namespace
 			// The root component is the collision capsule; its bounds' horizontal extent is the radius.
 			if (USceneComponent* root = dino->RootComponentField().Get())
 			{
-				const auto& bounds = root->BoundsField();
-				item.radius = (std::max)(static_cast<double>(bounds.BoxExtent.X), static_cast<double>(bounds.BoxExtent.Y));
+				// FBoxSphereBounds is { FVector Origin; FVector BoxExtent; double SphereRadius; } in doubles.
+				const double* bounds = reinterpret_cast<const double*>(&root->BoundsField());
+				item.radius = (std::max)(bounds[3], bounds[4]);
 				item.attached = root->AttachParentField().Get() != nullptr;
 			}
 		}

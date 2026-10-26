@@ -768,8 +768,8 @@ namespace SpawnControl
 						if (o.x - c.x >= reach)
 							break;
 						const double ex = c.x - o.x, ey = c.y - o.y, ez = c.z - o.z;
-						const double near = (c.radius + o.radius) * overlap_fraction;
-						if (ex * ex + ey * ey + ez * ez < near * near)
+						const double touch_distance = (c.radius + o.radius) * overlap_fraction;
+						if (ex * ex + ey * ey + ez * ez < touch_distance * touch_distance)
 						{
 							touching[by_x[a]].push_back(by_x[b]);
 							touching[by_x[b]].push_back(by_x[a]);
