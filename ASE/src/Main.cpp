@@ -1216,6 +1216,23 @@ namespace
 			<< " since load; zone spawn calls " << g_zone_spawn_calls
 			<< (g_zone_hook_installed ? "" : " (hook not installed)")
 			<< (g_settings.ignore_summoned ? "" : " (IgnoreSummoned off)") << "\n";
+		{
+			// Which classes the last census found marked summoned, largest first.
+			std::vector<std::pair<int, size_t>> rows;
+			for (size_t c = 0; c < g_last.summoned_by_class.size() && c < g_classes.size(); ++c)
+			{
+				if (g_last.summoned_by_class[c] > 0)
+					rows.emplace_back(g_last.summoned_by_class[c], c);
+			}
+			std::sort(rows.rbegin(), rows.rend());
+			if (!rows.empty())
+			{
+				out << "  summoned at the last census:";
+				for (size_t i = 0; i < rows.size() && i < 8; ++i)
+					out << (i == 0 ? " " : ", ") << rows[i].first << " " << g_classes[rows[i].second].info.short_name;
+				out << (rows.size() > 8 ? ", ...\n" : "\n");
+			}
+		}
 
 		if (!filter.empty())
 		{
