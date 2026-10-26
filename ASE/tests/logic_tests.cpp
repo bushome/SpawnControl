@@ -287,8 +287,9 @@ static void TestDensity()
 	add(0, 50000, 0, 1); add(0, 0, 50000, 1); add(1, -50000, 0, 1);  // ids 10-12, alone
 	const Plan plan = PlanRemovals(rules, {}, creatures, density);
 	CHECK(plan.too_dense == 6);                    // the clump ends at 4
-	CHECK(plan.hotspots.size() == 1 && plan.hotspots[0].count == 10);
-	CHECK(plan.hotspots[0].x == 45 && plan.hotspots[0].classes.size() == 2 && plan.hotspots[0].classes[0].first == 5);
+	CHECK(plan.hotspots.size() == 1 && !plan.hotspots[0].empty() && plan.hotspots[0][0].count == 10);
+	CHECK(plan.hotspots[0][0].x == 45 && plan.hotspots[0][0].classes.size() == 2 && plan.hotspots[0][0].classes[0].first == 5);
+	CHECK(plan.hotspots[0].size() == 1);           // the shifted grid's view of the same clump is not listed twice
 	CHECK(plan.class_counts[0] + plan.class_counts[1] == 7);
 	for (size_t id : plan.remove)
 		CHECK(id < 10);                            // strays never touched
@@ -315,6 +316,7 @@ static void TestDensity()
 	}
 	const Plan split = PlanRemovals(rules, {}, two, density);
 	CHECK(split.too_dense == 4);
+	CHECK(split.hotspots[0].size() == 2 && split.hotspots[0][0].count == 6 && split.hotspots[0][1].count == 6);
 	CHECK(PlanRemovals(rules, {}, two).remove.empty()); // no density rules, nothing to do
 
 	// Caves and skip areas are left alone; Exclude keeps a class out of a rule.

@@ -103,7 +103,7 @@ namespace
 		size_t summoned = 0;                  // wild, summoned by another creature, outside the rules
 		size_t too_dense = 0;                 // planned by density rules
 		size_t in_block_area = 0;             // planned because they are inside a block area
-		std::vector<DensityHotspot> hotspots; // fullest cube per density rule
+		std::vector<std::vector<DensityHotspot>> hotspots; // fullest cubes per density rule
 		std::vector<int> summoned_by_class;   // the summoned part of wild_by_class
 		std::vector<int> wild_by_class;       // every class, protected included
 		std::vector<int> mission_by_class;
@@ -1308,18 +1308,21 @@ namespace
 				const DensityRule& rule = g_rules->density[d];
 				out << "  density " << rule.name << ": max " << rule.max << " per " << static_cast<int>(rule.size / kFoundation)
 					<< " foundations" << (rule.exclude.empty() ? "" : ", with exclusions") << "\n";
-				if (d < g_last.hotspots.size() && g_last.hotspots[d].count > 0)
+				if (d < g_last.hotspots.size() && !g_last.hotspots[d].empty())
 				{
-					const DensityHotspot& spot = g_last.hotspots[d];
-					out << "    fullest cube last census: " << spot.count << " at " << static_cast<int>(spot.x) << " "
-						<< static_cast<int>(spot.y) << " " << static_cast<int>(spot.z) << " (";
-					for (size_t k = 0; k < spot.classes.size() && k < 4; ++k)
+					out << "    fullest cubes last census (before thinning):\n";
+					for (const DensityHotspot& spot : g_last.hotspots[d])
 					{
-						const int c = spot.classes[k].second;
-						out << (k == 0 ? "" : ", ") << spot.classes[k].first << " "
-							<< (c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"));
+						out << "      " << spot.count << " at " << static_cast<int>(spot.x) << " " << static_cast<int>(spot.y) << " "
+							<< static_cast<int>(spot.z) << " (";
+						for (size_t k = 0; k < spot.classes.size() && k < 4; ++k)
+						{
+							const int c = spot.classes[k].second;
+							out << (k == 0 ? "" : ", ") << spot.classes[k].first << " "
+								<< (c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"));
+						}
+						out << (spot.classes.size() > 4 ? ", ...)" : ")") << "\n";
 					}
-					out << (spot.classes.size() > 4 ? ", ...)" : ")") << "\n";
 				}
 			}
 			if (!g_rules->density.empty())

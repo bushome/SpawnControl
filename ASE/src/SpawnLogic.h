@@ -635,7 +635,9 @@ namespace SpawnControl
 		return false;
 	}
 
-	// The fullest cube a density rule found before thinning, for tuning Max.
+	constexpr size_t kHotspotsPerRule = 10;
+
+	// One of the fullest cubes a density rule found before thinning, for tuning Max and finding dumps.
 	struct DensityHotspot
 	{
 		int count = 0;
@@ -653,7 +655,7 @@ namespace SpawnControl
 		size_t over_group = 0;
 		size_t too_dense = 0;
 		size_t in_block_area = 0;
-		std::vector<DensityHotspot> hotspots;     // one per density rule
+		std::vector<std::vector<DensityHotspot>> hotspots;  // per density rule, fullest first
 	};
 
 	// Which creatures to remove so every block, limit and group limit holds. Blocked creatures come
@@ -779,7 +781,13 @@ namespace SpawnControl
 		for (size_t d = 0; d < density.size(); ++d)
 		{
 			const DensityRule& rule = density[d];
-			DensityHotspot& hotspot = plan.hotspots[d];
+			struct Candidate
+			{
+				int count = 0;
+				double x = 0, y = 0, z = 0;
+				std::vector<size_t> list;
+			};
+			std::vector<Candidate> candidates;
 			std::vector<size_t> members;
 			for (size_t i = 0; i < creatures.size(); ++i)
 			{
@@ -815,25 +823,33 @@ namespace SpawnControl
 					const Creature& c = creatures[i];
 					cells[key3(cell_key(c.x, rule.size, shift), cell_key(c.y, rule.size, shift), cell_key(c.z, rule.size, shift))].push_back(i);
 				}
+				// The fullest cells of this pass, before thinning.
+				std::vector<std::pair<size_t, const std::vector<size_t>*>> fullest;
+				for (const auto& [key, list] : cells)
+				{
+					if (list.size() >= 2)
+						fullest.emplace_back(list.size(), &list);
+				}
+				const size_t keep = (std::min)(fullest.size(), kHotspotsPerRule * 4);
+				std::partial_sort(fullest.begin(), fullest.begin() + keep, fullest.end(),
+					[](const auto& a, const auto& b) { return a.first > b.first; });
+				for (size_t f = 0; f < keep; ++f)
+				{
+					const std::vector<size_t>& list = *fullest[f].second;
+					Candidate candidate;
+					candidate.count = static_cast<int>(list.size());
+					for (size_t i : list)
+					{
+						candidate.x += creatures[i].x / list.size();
+						candidate.y += creatures[i].y / list.size();
+						candidate.z += creatures[i].z / list.size();
+					}
+					candidate.list = list;
+					candidates.push_back(std::move(candidate));
+				}
+
 				for (auto& [key, list] : cells)
 				{
-					if (static_cast<int>(list.size()) > hotspot.count)
-					{
-						hotspot.count = static_cast<int>(list.size());
-						hotspot.x = hotspot.y = hotspot.z = 0;
-						std::map<int, int> by_class;
-						for (size_t i : list)
-						{
-							hotspot.x += creatures[i].x / list.size();
-							hotspot.y += creatures[i].y / list.size();
-							hotspot.z += creatures[i].z / list.size();
-							++by_class[creatures[i].class_index];
-						}
-						hotspot.classes.clear();
-						for (const auto& [c, n] : by_class)
-							hotspot.classes.emplace_back(n, c);
-						std::sort(hotspot.classes.rbegin(), hotspot.classes.rend());
-					}
 					if (list.size() <= static_cast<size_t>(rule.max))
 						continue;
 					std::stable_sort(list.begin(), list.end(), [&](size_t a, size_t b)
@@ -849,6 +865,37 @@ namespace SpawnControl
 						++plan.too_dense;
 					}
 				}
+			}
+
+			// The fullest cubes, one per spot: the shifted grid sees the same clump again, so a cube whose
+			// centre is within half a cube of one already listed is the same spot.
+			std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) { return a.count > b.count; });
+			std::vector<DensityHotspot>& spots = plan.hotspots[d];
+			const double same_spot = rule.size * rule.size / 4;
+			for (const Candidate& candidate : candidates)
+			{
+				if (spots.size() >= kHotspotsPerRule)
+					break;
+				bool seen = false;
+				for (const DensityHotspot& spot : spots)
+				{
+					const double dx = spot.x - candidate.x, dy = spot.y - candidate.y, dz = spot.z - candidate.z;
+					seen = seen || dx * dx + dy * dy + dz * dz < same_spot;
+				}
+				if (seen)
+					continue;
+				DensityHotspot spot;
+				spot.count = candidate.count;
+				spot.x = candidate.x;
+				spot.y = candidate.y;
+				spot.z = candidate.z;
+				std::map<int, int> by_class;
+				for (size_t i : candidate.list)
+					++by_class[creatures[i].class_index];
+				for (const auto& [c, n] : by_class)
+					spot.classes.emplace_back(n, c);
+				std::sort(spot.classes.rbegin(), spot.classes.rend());
+				spots.push_back(std::move(spot));
 			}
 		}
 		return plan;
