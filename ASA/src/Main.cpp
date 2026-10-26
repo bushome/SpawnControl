@@ -84,6 +84,7 @@ namespace
 		int class_index = 0;
 		double player_distance = 0;
 		double x = 0, y = 0, z = 0;
+		bool in_cave = false;
 	};
 
 	struct Report
@@ -737,6 +738,7 @@ namespace
 		item.x = static_cast<double>(location.X);
 		item.y = static_cast<double>(location.Y);
 		item.z = static_cast<double>(location.Z);
+		item.in_cave = dino->bWasSpawnedInACaveOrBossArea()();
 		g_census_items.push_back(item);
 	}
 
@@ -793,14 +795,16 @@ namespace
 		for (size_t i = 0; i < g_census_items.size(); ++i)
 		{
 			const CensusItem& item = g_census_items[i];
-			creatures.push_back({ i, item.class_index, item.player_distance, item.x, item.y, item.z });
+			creatures.push_back({ i, item.class_index, item.player_distance, item.x, item.y, item.z, item.in_cave });
 		}
 
 		static const std::vector<GroupRule> no_groups;
 		static const std::vector<DensityRule> no_density;
 		const std::vector<GroupRule>& groups = g_rules != nullptr ? g_rules->groups : no_groups;
 		const std::vector<DensityRule>& density = g_rules != nullptr ? g_rules->density : no_density;
-		const Plan plan = PlanRemovals(rules, groups, creatures, density);
+		static const DensitySkip default_skip;
+		const DensitySkip& skip = g_rules != nullptr ? g_rules->density_skip : default_skip;
+		const Plan plan = PlanRemovals(rules, groups, creatures, density, skip);
 
 		// Live counts start from what each rule leaves after the planned removals.
 		g_class_counts.assign(g_classes.size(), 0);
@@ -1169,9 +1173,15 @@ namespace
 			}
 			for (const DensityRule& rule : g_rules->density)
 				out << "  density " << rule.name << ": max " << rule.max << " per " << static_cast<int>(rule.size / kFoundation)
-					<< " foundations\n";
+					<< " foundations" << (rule.exclude.empty() ? "" : ", with exclusions") << "\n";
 			if (!g_rules->density.empty())
-				out << "  density removals planned by the last census: " << g_last.too_dense << "\n";
+			{
+				out << "  density skips: caves " << (g_rules->density_skip.caves ? "on" : "off") << "";
+				for (const DensityArea& area : g_rules->density_skip.areas)
+					out << ", " << (area.name.empty() ? std::string("area") : area.name) << " (" << static_cast<int>(area.radius / kFoundation)
+						<< " foundations)";
+				out << "\n  density removals planned by the last census: " << g_last.too_dense << "\n";
+			}
 		}
 		for (size_t f = 0; f < g_settings.report_families.size() && f < g_last.family_wild.size(); ++f)
 		{

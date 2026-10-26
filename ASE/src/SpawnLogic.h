@@ -119,6 +119,21 @@ namespace SpawnControl
 		double size = 0;                   // Unreal units
 		bool all = false;                  // "*": every wild creature that is not protected
 		std::vector<std::string> classes;  // counted together; the key itself when Classes is not given
+		std::vector<std::string> exclude;  // never counted by this rule (packs that are meant to be dense)
+	};
+
+	// Places where density rules do not apply: a horizontal circle around a point.
+	struct DensityArea
+	{
+		std::string name;
+		double x = 0, y = 0;
+		double radius = 0;                 // Unreal units
+	};
+
+	struct DensitySkip
+	{
+		bool caves = true;                 // creatures the game spawned in a cave or boss area
+		std::vector<DensityArea> areas;
 	};
 
 	struct MapRules
@@ -128,6 +143,7 @@ namespace SpawnControl
 		std::vector<std::pair<std::string, int>> limits; // class key -> max wild count
 		std::vector<GroupRule> groups;
 		std::vector<DensityRule> density;
+		DensitySkip density_skip;
 	};
 
 	struct ReportFamily
@@ -293,6 +309,7 @@ namespace SpawnControl
 						rule.max = ReadInt(it.value(), "Max", -1, 1, warnings);
 						int area = ReadInt(it.value(), "AreaInFoundations", -1, 1, warnings);
 						rule.classes = ReadStrings(it.value(), "Classes", {}, warnings, density_where);
+						rule.exclude = ReadStrings(it.value(), "Exclude", {}, warnings, density_where);
 						if (rule.max < 1 || area < 1)
 						{
 							warnings.push_back(density_where + "Max and AreaInFoundations must both be 1 or more; skipped");
@@ -308,6 +325,52 @@ namespace SpawnControl
 							rule.classes.push_back(it.key());
 						rule.size = area * kFoundation;
 						rules.density.push_back(std::move(rule));
+					}
+				}
+			}
+
+			if (section.contains("DensitySkip"))
+			{
+				const nlohmann::json& skip = section["DensitySkip"];
+				const std::string skip_where = where + "DensitySkip.";
+				if (!skip.is_object())
+					warnings.push_back(where + "DensitySkip must be an object with Caves and Areas; ignored");
+				else
+				{
+					if (skip.contains("Caves"))
+					{
+						if (skip["Caves"].is_boolean())
+							rules.density_skip.caves = skip["Caves"].get<bool>();
+						else
+							warnings.push_back(skip_where + "Caves must be true or false; using true");
+					}
+					if (skip.contains("Areas"))
+					{
+						const nlohmann::json& areas = skip["Areas"];
+						if (!areas.is_array())
+							warnings.push_back(skip_where + "Areas must be a list; ignored");
+						else
+						{
+							for (size_t a = 0; a < areas.size(); ++a)
+							{
+								const nlohmann::json& entry = areas[a];
+								const std::string area_where = skip_where + "Areas[" + std::to_string(a) + "] ";
+								const nlohmann::json* location = entry.is_object() && entry.contains("Location") ? &entry["Location"] : nullptr;
+								const int radius = ReadInt(entry, "RadiusInFoundations", -1, 1, warnings);
+								if (location == nullptr || !location->is_array() || location->size() < 2 ||
+									!(*location)[0].is_number() || !(*location)[1].is_number() || radius < 1)
+								{
+									warnings.push_back(area_where + "needs Location [x, y] or [x, y, z] and RadiusInFoundations of 1 or more; skipped");
+									continue;
+								}
+								DensityArea area;
+								area.name = entry.contains("Name") && entry["Name"].is_string() ? entry["Name"].get<std::string>() : "";
+								area.x = (*location)[0].get<double>();
+								area.y = (*location)[1].get<double>();
+								area.radius = radius * kFoundation;
+								rules.density_skip.areas.push_back(std::move(area));
+							}
+						}
 					}
 				}
 			}
@@ -484,6 +547,8 @@ namespace SpawnControl
 			bool member = rules->density[d].all;
 			for (const std::string& key : rules->density[d].classes)
 				member = member || KeyMatches(key, info);
+			for (const std::string& key : rules->density[d].exclude)
+				member = member && !KeyMatches(key, info);
 			if (member)
 				rule.density.push_back(static_cast<int>(d));
 		}
@@ -506,7 +571,21 @@ namespace SpawnControl
 		int class_index = 0;         // index into the rules vector passed to PlanRemovals
 		double player_distance = 0;  // to the nearest player; larger = removed sooner
 		double x = 0, y = 0, z = 0;  // where it is, for density rules
+		bool in_cave = false;        // the game spawned it in a cave or boss area
 	};
+
+	inline bool SkipsDensity(const DensitySkip& skip, const Creature& creature)
+	{
+		if (skip.caves && creature.in_cave)
+			return true;
+		for (const DensityArea& area : skip.areas)
+		{
+			const double dx = creature.x - area.x, dy = creature.y - area.y;
+			if (dx * dx + dy * dy <= area.radius * area.radius)
+				return true;
+		}
+		return false;
+	}
 
 	struct Plan
 	{
@@ -528,7 +607,7 @@ namespace SpawnControl
 	// more than Max of a rule's classes. Checked on two grids, the second shifted by half a cube, so a
 	// clump on a cube edge is still caught; the farthest from players in an over-full cube go first.
 	inline Plan PlanRemovals(const std::vector<ClassRule>& rules, const std::vector<GroupRule>& groups,
-		const std::vector<Creature>& creatures, const std::vector<DensityRule>& density = {})
+		const std::vector<Creature>& creatures, const std::vector<DensityRule>& density = {}, const DensitySkip& skip = {})
 	{
 		Plan plan;
 		plan.class_counts.assign(rules.size(), 0);
@@ -622,7 +701,13 @@ namespace SpawnControl
 			}
 		}
 
-		// 4. Density.
+		// 4. Density, outside caves and skip areas.
+		std::vector<bool> skips_density(creatures.size(), false);
+		if (!density.empty())
+		{
+			for (size_t i = 0; i < creatures.size(); ++i)
+				skips_density[i] = SkipsDensity(skip, creatures[i]);
+		}
 		for (size_t d = 0; d < density.size(); ++d)
 		{
 			const DensityRule& rule = density[d];
@@ -630,7 +715,7 @@ namespace SpawnControl
 			for (size_t i = 0; i < creatures.size(); ++i)
 			{
 				const int c = creatures[i].class_index;
-				if (removed[i] || c < 0 || static_cast<size_t>(c) >= rules.size() || rules[c].is_protected)
+				if (removed[i] || skips_density[i] || c < 0 || static_cast<size_t>(c) >= rules.size() || rules[c].is_protected)
 					continue;
 				const auto& member_of = rules[c].density;
 				if (std::find(member_of.begin(), member_of.end(), static_cast<int>(d)) != member_of.end())

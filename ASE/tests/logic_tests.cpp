@@ -314,6 +314,34 @@ static void TestDensity()
 	const Plan split = PlanRemovals(rules, {}, two, density);
 	CHECK(split.too_dense == 4);
 	CHECK(PlanRemovals(rules, {}, two).remove.empty()); // no density rules, nothing to do
+
+	// Caves and skip areas are left alone; Exclude keeps a class out of a rule.
+	std::vector<Creature> cave = creatures;
+	for (int i = 0; i < 10; ++i) cave[i].in_cave = true;
+	CHECK(PlanRemovals(rules, {}, cave, density).too_dense == 0);
+	DensitySkip no_caves;
+	no_caves.caves = false;
+	CHECK(PlanRemovals(rules, {}, cave, density, no_caves).too_dense == 6);
+	DensitySkip city;
+	city.areas.push_back({ "City", 40, 0, 200 });
+	CHECK(PlanRemovals(rules, {}, creatures, density, city).too_dense == 0);
+	city.areas[0].x = 5000;
+	CHECK(PlanRemovals(rules, {}, creatures, density, city).too_dense == 6);
+
+	const Settings skip_parsed = Parse(R"({ "Maps": { "M": {
+		"Density": { "*": { "Max": 40, "AreaInFoundations": 30, "Exclude": [ "Nameless_C" ] } },
+		"DensitySkip": { "Caves": false, "Areas": [ { "Name": "City", "Location": [ 1000, -2000, 50 ], "RadiusInFoundations": 100 },
+			{ "Location": [ 1 ] } ] } } } })");
+	const MapRules& skip_map = skip_parsed.maps.front();
+	CHECK(!skip_map.density_skip.caves);
+	CHECK(skip_map.density_skip.areas.size() == 1 && skip_map.density_skip.areas[0].name == "City" &&
+		skip_map.density_skip.areas[0].y == -2000 && skip_map.density_skip.areas[0].radius == 100 * kFoundation);
+	CHECK(skip_parsed.warnings.size() == 1); // the bad area is skipped
+	ClassInfo nameless;
+	nameless.short_name = "Nameless_C";
+	nameless.path = "/Game/Aberration/Nameless.Nameless_C";
+	CHECK(ResolveClass(settings, &skip_map, nameless).density.empty());
+	CHECK(ResolveClass(settings, &skip_map, bary).density.size() == 1);
 }
 
 static void TestOverOnSpawn()
