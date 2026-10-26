@@ -1229,7 +1229,7 @@ namespace
 		size_t pops = 0;
 		while (budget > 0 && pops < kMeshPopsPerSecond && !g_mesh_queue.empty())
 		{
-			const MeshCandidate candidate = g_mesh_queue.front();
+			MeshCandidate candidate = g_mesh_queue.front();
 			g_mesh_queue.pop_front();
 			++pops;
 			APrimalDinoCharacter* dino = candidate.creature.Get();
