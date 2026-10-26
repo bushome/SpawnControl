@@ -163,6 +163,7 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 |---|---|
 | `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class and every group with its count now and each member's count (the last census minus what it queued for removal, plus spawns since), the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
 | `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. Live counts carry over, so limits keep holding without waiting for a census: classes that already had a rule keep their count, newly ruled classes start from the last census. |
+| `SpawnControl.Links <text>` | For wild creatures whose class path contains the text: what they are linked to (owner, instigator, wild following parent, followers they lead, zone manager link), as counts. One pass over all actors; for diagnosing creatures that spawn others. Also written to the log. |
 
 ## Troubleshooting
 

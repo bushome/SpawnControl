@@ -28,6 +28,7 @@
 #include <cwctype>
 #include <deque>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -47,6 +48,7 @@ namespace
 
 	const char* const kCmdReload = "SpawnControl.Reload";
 	const char* const kCmdList = "SpawnControl.List";
+	const char* const kCmdLinks = "SpawnControl.Links";
 	const char* const kTimerId = "SpawnControl.Timer";
 	const char* const kHookEntry = "ANPCZoneManager.IsValidNPCEntry(FNPCSpawnEntry&)";
 	const char* const kHookBeginPlay = "APrimalDinoCharacter.BeginPlay()";
@@ -1207,6 +1209,114 @@ namespace
 		}
 	}
 
+	// ------------------------------------------------------------------------------------------
+	// Links: what the wild creatures of matching classes are linked to (owner, instigator, wild
+	// follower parent and followers, zone manager link). One pass over every level actor.
+	// ------------------------------------------------------------------------------------------
+
+	std::string ClassNameOf(UObject* object)
+	{
+		if (object == nullptr)
+			return "none";
+		UClass* cls = object->ClassField();
+		return cls != nullptr ? cls->NameField().ToString().ToString() : "?";
+	}
+
+	std::string LinksText(const std::string& filter)
+	{
+		if (filter.empty())
+			return std::string("Usage: ") + kCmdLinks + " <text>, e.g. " + kCmdLinks + " skinny\n";
+		UWorld* world = World();
+		if (world == nullptr)
+			return "No world.\n";
+
+		using Tally = std::map<std::string, int>;
+		Tally owner, instigator, parent, followers_of_leaders, matched_classes;
+		int total = 0, self_owner = 0, self_instigator = 0, direct_link = 0, follower_bit = 0, leaders = 0, summoned = 0;
+
+		const std::string needle = ToLower(filter);
+		UClass* dino_class = APrimalDinoCharacter::GetPrivateStaticClass();
+		auto& levels = world->LevelsField();
+		for (int32 l = 0; l < levels.Num(); ++l)
+		{
+			ULevel* level = levels[l].Get();
+			if (level == nullptr)
+				continue;
+			TArray<AActor*>& actors = *GetNativePointerField<TArray<AActor*>*>(level, kLevelActorsField);
+			for (int32 a = 0; a < actors.Num(); ++a)
+			{
+				AActor* actor = actors[a];
+				if (actor == nullptr || !actor->IsA(dino_class))
+					continue;
+				APrimalDinoCharacter* dino = static_cast<APrimalDinoCharacter*>(actor);
+				const Kind kind = Classify(dino);
+				if (kind != Kind::Wild && kind != Kind::Summoned)
+					continue;
+				const ClassEntry& entry = g_classes[ClassIndexFor(dino->ClassField())];
+				if (ToLower(entry.info.path).find(needle) == std::string::npos)
+					continue;
+
+				++total;
+				++matched_classes[entry.info.short_name];
+				if (kind == Kind::Summoned)
+					++summoned;
+				AActor* own = dino->OwnerField().Get();
+				AActor* ins = dino->InstigatorField().Get();
+				if (own == dino) ++self_owner; else ++owner[ClassNameOf(own)];
+				if (ins == dino) ++self_instigator; else ++instigator[ClassNameOf(ins)];
+				++parent[ClassNameOf(dino->WildFollowingParentRefField())];
+				if (dino->DirectLinkNPCZoneManagerField() != nullptr)
+					++direct_link;
+				if (dino->bIsAWildFollowerKnownServerside()())
+					++follower_bit;
+				auto& followers = dino->WildFollowerRefsField();
+				if (followers.Num() > 0)
+				{
+					++leaders;
+					for (int32 f = 0; f < followers.Num(); ++f)
+						++followers_of_leaders[ClassNameOf(followers[f])];
+				}
+			}
+		}
+
+		std::ostringstream out;
+		auto write = [&out](const char* label, const Tally& tally)
+		{
+			std::vector<std::pair<int, std::string>> rows;
+			for (const auto& [name, count] : tally)
+				rows.emplace_back(count, name);
+			std::sort(rows.rbegin(), rows.rend());
+			out << label << ":";
+			if (rows.empty())
+				out << " -";
+			for (size_t i = 0; i < rows.size() && i < 8; ++i)
+				out << (i == 0 ? " " : ", ") << rows[i].second << " " << rows[i].first;
+			out << "\n";
+		};
+		out << "Links of " << total << " wild creature(s) matching \"" << filter << "\" (" << summoned
+			<< " counted as summoned)\n";
+		write("Classes", matched_classes);
+		out << "Owner: self " << self_owner << "; ";
+		write("others", owner);
+		out << "Instigator: self " << self_instigator << "; ";
+		write("others", instigator);
+		write("Wild following parent", parent);
+		out << "Wild follower flag set: " << follower_bit << "; zone manager direct link: " << direct_link << "\n";
+		out << "Leading followers: " << leaders << "; ";
+		write("their followers", followers_of_leaders);
+		return out.str();
+	}
+
+	void ConsoleLinks(APlayerController* controller, FString* command, bool)
+	{
+		if (AShooterPlayerController* admin = AdminFrom(controller))
+		{
+			const std::string text = LinksText(CommandArgument(command));
+			Log::GetLog()->info("Links:\n{}", text);
+			SendAdmin(admin, text);
+		}
+	}
+
 	void RconReply(RCONClientConnection* connection, RCONPacket* packet, const std::string& text)
 	{
 		FString reply(text);
@@ -1221,6 +1331,13 @@ namespace
 	void RconList(RCONClientConnection* connection, RCONPacket* packet, UWorld*)
 	{
 		RconReply(connection, packet, ListText(CommandArgument(&packet->Body)));
+	}
+
+	void RconLinks(RCONClientConnection* connection, RCONPacket* packet, UWorld*)
+	{
+		const std::string text = LinksText(CommandArgument(&packet->Body));
+		Log::GetLog()->info("Links:\n{}", text);
+		RconReply(connection, packet, text);
 	}
 } // namespace
 
@@ -1248,8 +1365,10 @@ extern "C" __declspec(dllexport) void Plugin_Init()
 
 	AsaApi::GetCommands().AddConsoleCommand(kCmdReload, &ConsoleReload);
 	AsaApi::GetCommands().AddConsoleCommand(kCmdList, &ConsoleList);
+	AsaApi::GetCommands().AddConsoleCommand(kCmdLinks, &ConsoleLinks);
 	AsaApi::GetCommands().AddRconCommand(kCmdReload, &RconReload);
 	AsaApi::GetCommands().AddRconCommand(kCmdList, &RconList);
+	AsaApi::GetCommands().AddRconCommand(kCmdLinks, &RconLinks);
 	AsaApi::GetCommands().AddOnTimerCallback(kTimerId, &SafeTimer);
 }
 
@@ -1259,8 +1378,10 @@ extern "C" __declspec(dllexport) void Plugin_Unload()
 	AsaApi::GetCommands().RemoveOnTimerCallback(kTimerId);
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdReload);
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdList);
+	AsaApi::GetCommands().RemoveConsoleCommand(kCmdLinks);
 	AsaApi::GetCommands().RemoveRconCommand(kCmdReload);
 	AsaApi::GetCommands().RemoveRconCommand(kCmdList);
+	AsaApi::GetCommands().RemoveRconCommand(kCmdLinks);
 
 	if (g_entry_hook_installed)
 	{
