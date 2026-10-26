@@ -89,6 +89,8 @@ reloading is enabled in ArkServerApi's own `config.json`, it swaps it in.
 
 ## config.json
 
+`//` and `/* */` comments are allowed. A comma right before a closing `]` or `}` is ignored with a warning naming its line, so a list trimmed to its last entry still loads; a missing comma still fails the load. Every key the plugin does not know is reported (`Config: Maps.LostColony.Overlapp is not a known setting here; ignored`), and a rule placed one level off says where it belongs, so a misplaced block is not silently ignored.
+
 Comments are allowed. `configs\config.commented.json` has the same values with every setting explained.
 
 ### General

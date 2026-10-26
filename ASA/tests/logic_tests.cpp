@@ -479,6 +479,44 @@ static void TestOverlap()
 	CHECK(both.overlapping == 2 && both.over_limit == 0);
 }
 
+static void TestConfigChecks()
+{
+	// Trailing commas: removed and reported by line; strings and comments untouched.
+	std::string text = "{\n  \"A\": [ 1, 2, ],\n  \"B\": \"x, ]\", // a, ]\n  \"C\": { \"D\": 1, /* , } */ },\n}";
+	const std::vector<int> lines = StripTrailingCommas(text);
+	CHECK(lines.size() == 3 && lines[0] == 2 && lines[1] == 4 && lines[2] == 4);
+	const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, true, true);
+	CHECK(parsed["A"].size() == 2 && parsed["B"] == "x, ]" && parsed["C"]["D"] == 1);
+	std::string escaped = "{ \"A\": \"quote \\\" , ]\", }";
+	CHECK(StripTrailingCommas(escaped).size() == 1 && nlohmann::json::parse(escaped)["A"] == "quote \" , ]");
+	std::string clean = "{ \"A\": [ 1, 2 ] }";
+	CHECK(StripTrailingCommas(clean).empty() && clean == "{ \"A\": [ 1, 2 ] }");
+
+	const Settings forgiving = ParseConfigText("{ \"General\": { \"RemovalsPerTick\": 5, }, }");
+	CHECK(forgiving.removals_per_tick == 5 && forgiving.warnings.size() == 2 && forgiving.warnings[0].rfind("line 1", 0) == 0);
+	CHECK_THROWS(ParseConfigText("{ \"A\": 1 \"B\": 2 }")); // a missing comma still fails
+
+	// Unknown keys: today's two misplacements, and a typo.
+	const Settings misplaced = Parse(R"({ "Maps": {
+		"LostColony": { "Limit": {}, "DensitySkip": { "Caves": true, "BlockAreas": [] }, "Overlapp": {} },
+		"Overlap": { "Fraction": 0.5 } },
+		"General": { "RemovalPerTick": 5 } })");
+	auto has = [&](const std::string& part)
+		{
+			for (const std::string& warning : misplaced.warnings)
+			{
+				if (warning.find(part) != std::string::npos)
+					return true;
+			}
+			return false;
+		};
+	CHECK(has("Maps.Overlap is a rule, not a map"));
+	CHECK(has("Maps.LostColony.DensitySkip.BlockAreas is not a known setting here; ignored (it belongs directly inside a map section"));
+	CHECK(has("Maps.LostColony.Overlapp is not a known setting"));
+	CHECK(has("General.RemovalPerTick is not a known setting"));
+	CHECK(misplaced.maps.size() == 2);
+}
+
 static void TestOverOnSpawn()
 {
 	std::vector<GroupRule> groups(1);
@@ -610,6 +648,7 @@ int main(int argc, char** argv)
 	TestDensity();
 	TestBlockAreas();
 	TestOverlap();
+	TestConfigChecks();
 	TestOverOnSpawn();
 	TestIsFull();
 	TestRefresh();

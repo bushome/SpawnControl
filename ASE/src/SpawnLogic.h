@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -456,6 +457,97 @@ namespace SpawnControl
 		}
 	}
 
+	namespace detail
+	{
+		inline bool OneOf(const std::string& key, std::initializer_list<const char*> known)
+		{
+			for (const char* name : known)
+			{
+				if (key == name)
+					return true;
+			}
+			return false;
+		}
+
+		constexpr std::initializer_list<const char*> kMapKeys = { "Block", "Limit", "GroupLimit", "Density", "DensitySkip", "BlockAreas", "Overlap" };
+
+		// Keys nobody reads are ignored by ARK-style configs without a word; here each one is a warning, with
+		// a hint when the key exists one level up or down.
+		inline void WarnUnknown(const nlohmann::json& object, std::initializer_list<const char*> known, const std::string& where,
+			std::vector<std::string>& warnings)
+		{
+			if (!object.is_object())
+				return;
+			for (auto it = object.begin(); it != object.end(); ++it)
+			{
+				if (OneOf(it.key(), known))
+					continue;
+				std::string hint;
+				if (OneOf(it.key(), kMapKeys))
+					hint = " (it belongs directly inside a map section, next to Limit)";
+				warnings.push_back(where + it.key() + " is not a known setting here; ignored" + hint);
+			}
+		}
+
+		inline void WarnUnknownAreas(const nlohmann::json& areas, const std::string& where, std::vector<std::string>& warnings)
+		{
+			if (!areas.is_array())
+				return;
+			for (size_t a = 0; a < areas.size(); ++a)
+				WarnUnknown(areas[a], { "Name", "Location", "RadiusInFoundations" }, where + "[" + std::to_string(a) + "].", warnings);
+		}
+
+		inline void WarnUnknownKeys(const nlohmann::json& root, std::vector<std::string>& warnings)
+		{
+			WarnUnknown(root, { "General", "Protect", "Refresh", "ReportFamilies", "Maps" }, "", warnings);
+			if (root.contains("General"))
+				WarnUnknown(root["General"], { "RemovalsPerTick", "CensusActorsPerTick", "CensusIntervalSeconds", "NearPlayerDistance",
+					"LogRemovals", "RefuseFullEntries", "IgnoreSummoned" }, "General.", warnings);
+			if (root.contains("Protect"))
+				WarnUnknown(root["Protect"], { "PathContains", "Families" }, "Protect.", warnings);
+			if (root.contains("Refresh"))
+				WarnUnknown(root["Refresh"], { "TurnoverHours", "MinAgeMinutes", "PlayerDistance", "RecentDamageSeconds",
+					"SkipPathContains" }, "Refresh.", warnings);
+			if (!root.contains("Maps") || !root["Maps"].is_object())
+				return;
+			const nlohmann::json& maps = root["Maps"];
+			for (auto it = maps.begin(); it != maps.end(); ++it)
+			{
+				const std::string where = "Maps." + it.key() + ".";
+				if (OneOf(it.key(), kMapKeys))
+				{
+					warnings.push_back("Maps." + it.key() + " is a rule, not a map; it belongs inside a map section such as Maps.<map>." +
+						it.key() + ", so it is not applied to any map");
+					continue;
+				}
+				const nlohmann::json& map = it.value();
+				WarnUnknown(map, kMapKeys, where, warnings);
+				if (!map.is_object())
+					continue;
+				if (map.contains("GroupLimit") && map["GroupLimit"].is_object())
+				{
+					for (auto g = map["GroupLimit"].begin(); g != map["GroupLimit"].end(); ++g)
+						WarnUnknown(g.value(), { "Max", "Classes" }, where + "GroupLimit." + g.key() + ".", warnings);
+				}
+				if (map.contains("Density") && map["Density"].is_object())
+				{
+					for (auto d = map["Density"].begin(); d != map["Density"].end(); ++d)
+						WarnUnknown(d.value(), { "Max", "AreaInFoundations", "Classes", "Exclude" }, where + "Density." + d.key() + ".", warnings);
+				}
+				if (map.contains("DensitySkip"))
+				{
+					WarnUnknown(map["DensitySkip"], { "Caves", "Areas" }, where + "DensitySkip.", warnings);
+					if (map["DensitySkip"].is_object() && map["DensitySkip"].contains("Areas"))
+						WarnUnknownAreas(map["DensitySkip"]["Areas"], where + "DensitySkip.Areas", warnings);
+				}
+				if (map.contains("BlockAreas"))
+					WarnUnknownAreas(map["BlockAreas"], where + "BlockAreas", warnings);
+				if (map.contains("Overlap"))
+					WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
+			}
+		}
+	}
+
 	// Throws only for a document that is not an object; everything else becomes a warning and a default.
 	inline Settings ParseSettings(const nlohmann::json& root)
 	{
@@ -464,6 +556,7 @@ namespace SpawnControl
 
 		Settings settings;
 		std::vector<std::string>& warnings = settings.warnings;
+		detail::WarnUnknownKeys(root, warnings);
 
 		const nlohmann::json general = root.value("General", nlohmann::json::object());
 		settings.removals_per_tick = detail::ReadInt(general, "RemovalsPerTick", settings.removals_per_tick, 1, warnings);
@@ -1145,5 +1238,108 @@ namespace SpawnControl
 		for (size_t i = 0; i < candidates.size() && picked.size() < quota; ++i)
 			picked.push_back(candidates[i].id);
 		return picked;
+	}
+
+	// A comma right before ] or } (whitespace and comments between allowed) is removed before parsing, so a
+	// list edited down to its last entry still loads. Strings and comments are left alone. Returns the line
+	// of every comma removed.
+	inline std::vector<int> StripTrailingCommas(std::string& text)
+	{
+		std::vector<int> lines;
+		std::string out;
+		out.reserve(text.size());
+		int line = 1;
+		auto next_significant = [&](size_t from)
+			{
+				size_t i = from;
+				while (i < text.size())
+				{
+					const char c = text[i];
+					if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+						++i;
+					else if (c == '/' && i + 1 < text.size() && text[i + 1] == '/')
+					{
+						while (i < text.size() && text[i] != '\n')
+							++i;
+					}
+					else if (c == '/' && i + 1 < text.size() && text[i + 1] == '*')
+					{
+						const size_t end = text.find("*/", i + 2);
+						i = end == std::string::npos ? text.size() : end + 2;
+					}
+					else
+						return c;
+				}
+				return '\0';
+			};
+		for (size_t i = 0; i < text.size(); ++i)
+		{
+			const char c = text[i];
+			if (c == '\n')
+				++line;
+			if (c == '"')
+			{
+				// Copy the whole string, escapes included.
+				out += c;
+				for (++i; i < text.size(); ++i)
+				{
+					out += text[i];
+					if (text[i] == '\\' && i + 1 < text.size())
+						out += text[++i];
+					else if (text[i] == '"')
+						break;
+					else if (text[i] == '\n')
+						++line;
+				}
+				continue;
+			}
+			if (c == '/' && i + 1 < text.size() && (text[i + 1] == '/' || text[i + 1] == '*'))
+			{
+				const bool block = text[i + 1] == '*';
+				const size_t end = block ? text.find("*/", i + 2) : text.find('\n', i);
+				const size_t stop = end == std::string::npos ? text.size() : (block ? end + 2 : end);
+				for (; i < stop; ++i)
+				{
+					out += text[i];
+					if (text[i] == '\n')
+						++line;
+				}
+				--i;
+				continue;
+			}
+			if (c == ',')
+			{
+				const char after = next_significant(i + 1);
+				if (after == ']' || after == '}')
+				{
+					lines.push_back(line);
+					continue;
+				}
+			}
+			out += c;
+		}
+		text.swap(out);
+		return lines;
+	}
+
+	// The whole config.json text to settings: trailing commas tolerated (each one a warning), comments allowed.
+	inline Settings ParseConfigText(std::string text)
+	{
+		const std::vector<int> commas = StripTrailingCommas(text);
+		nlohmann::json root;
+		try
+		{
+			root = nlohmann::json::parse(text, nullptr, true, true);
+		}
+		catch (const nlohmann::json::exception& error)
+		{
+			throw std::runtime_error(std::string("config.json is not valid JSON: ") + error.what());
+		}
+		Settings settings = ParseSettings(root);
+		std::vector<std::string> comma_warnings;
+		for (int line : commas)
+			comma_warnings.push_back("line " + std::to_string(line) + ": comma before a closing ] or } ignored; remove it to keep the file valid JSON");
+		settings.warnings.insert(settings.warnings.begin(), comma_warnings.begin(), comma_warnings.end());
+		return settings;
 	}
 }

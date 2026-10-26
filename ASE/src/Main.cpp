@@ -34,6 +34,7 @@
 #include <cwctype>
 #include <deque>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -513,21 +514,13 @@ namespace
 	{
 		const std::string path = ArkApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/" PROJECT_NAME "/config.json";
 
-		std::ifstream file(path);
+		std::ifstream file(path, std::ios::binary);
 		if (!file.is_open())
 			throw std::runtime_error("cannot open " + path);
+		std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
-		nlohmann::json root;
-		try
-		{
-			// Last argument: allow // and /* */ comments in config.json.
-			root = nlohmann::json::parse(file, nullptr, true, true);
-		}
-		catch (const nlohmann::json::exception& error)
-		{
-			throw std::runtime_error(std::string("config.json is not valid JSON: ") + error.what());
-		}
-		return ParseSettings(root);
+		// Comments are allowed, and a comma before a closing ] or } is dropped with a warning.
+		return ParseConfigText(std::move(text));
 	}
 
 	// Loads config.json. On failure the previous settings stay in force.
