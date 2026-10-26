@@ -542,6 +542,21 @@ static void TestUnderMesh()
 	CHECK(!ResolveClass(settings, &parsed.maps[0], corrupted).under_mesh);
 	CHECK(!ResolveClass(settings, &parsed.maps[3], raptor).under_mesh);
 
+	CHECK(!parsed.maps[0].under_mesh.remove);
+	const Settings removing = Parse(R"({ "Maps": { "A": { "UnderMesh": { "Remove": true } }, "B": { "UnderMesh": { "Remove": "yes" } } } })");
+	CHECK(removing.maps[0].under_mesh.remove && !removing.maps[1].under_mesh.remove && removing.warnings.size() == 1);
+
+	// Confirmation: two "below" results on different censuses; overlapping or clear resets.
+	uint32_t first = 0;
+	CHECK(!ConfirmUnderMesh(true, false, 5, first) && first == 5);
+	CHECK(!ConfirmUnderMesh(true, false, 5, first));            // same census again: not yet
+	CHECK(ConfirmUnderMesh(true, false, 6, first));             // a later census: confirmed
+	first = 0;
+	CHECK(!ConfirmUnderMesh(true, true, 5, first) && first == 0); // overlapping only: never
+	CHECK(!ConfirmUnderMesh(true, false, 5, first) && first == 5);
+	CHECK(!ConfirmUnderMesh(false, false, 6, first) && first == 0); // clear in between: starts over
+	CHECK(!ConfirmUnderMesh(true, false, 7, first) && first == 7);
+
 	const Settings typo = Parse(R"({ "Maps": { "A": { "UnderMesh": { "ChecksPerTick": 5 } } } })");
 	CHECK(typo.warnings.size() == 1 && typo.warnings[0].find("UnderMesh.ChecksPerTick") != std::string::npos);
 }

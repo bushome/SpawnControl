@@ -243,6 +243,9 @@ namespace
 	double g_mesh_total_us = 0;
 	double g_mesh_max_us = 0;
 	size_t g_mesh_logged_this_minute = 0;
+	uint32_t g_census_number = 0;                       // finished censuses since load
+	std::unordered_map<uint64_t, uint32_t> g_mesh_first_below; // creature -> census it was first found below in
+	uint64_t g_mesh_removal_queued = 0;                 // creatures (and their followers) queued for removal
 	uint64_t g_stopped_zone_refusals = 0;
 	uint64_t g_block_area_queued = 0;                   // creatures queued for being inside a block area
 	uint64_t g_summoned_seen = 0;                       // creatures marked summoned since load
@@ -924,6 +927,9 @@ namespace
 		g_building.overlapping = plan.overlapping;
 		g_building.overlap_samples = plan.overlap_samples;
 
+		++g_census_number;
+		for (auto it = g_mesh_first_below.begin(); it != g_mesh_first_below.end();)
+			it = it->second + 3 < g_census_number ? g_mesh_first_below.erase(it) : std::next(it); // not seen again for a while
 		g_mesh_queue.clear();
 		if (g_rules != nullptr && g_rules->under_mesh.enabled)
 		{
@@ -1222,6 +1228,25 @@ namespace
 		}
 	}
 
+	// A creature found below the surface on two censuses is queued for removal like a block-area creature.
+	void RemoveUnderMesh(APrimalDinoCharacter* dino, int class_index, const FVector& location)
+	{
+		size_t queued = 0;
+		if (Enqueue(dino, class_index, false, true))
+		{
+			++queued;
+			if (g_counts_ready && HasAnyRule(g_classes[class_index].rule))
+				AdjustCounts(class_index, -1);
+		}
+		// The ASE API has no wild follower list, so followers are left to their own tests.
+		if (queued == 0)
+			return;
+		g_mesh_removal_queued += queued;
+		Log::GetLog()->info("Under mesh: removing {} at {:.0f} {:.0f} {:.0f} (below on two censuses){}", g_classes[class_index].info.short_name,
+			static_cast<double>(location.X), static_cast<double>(location.Y), static_cast<double>(location.Z),
+			queued > 1 ? " with " + std::to_string(queued - 1) + " follower(s)" : std::string());
+	}
+
 	void MeshTick()
 	{
 		if (g_rules == nullptr || !g_rules->under_mesh.enabled || g_mesh_queue.empty())
@@ -1237,8 +1262,9 @@ namespace
 			if (dino == nullptr || Classify(dino) != Kind::Wild || dino->bStasised()())
 				continue; // gone, tamed, or asleep in stasis: tested when a later census finds it awake
 			const uint64_t key = WeakKey(candidate.creature);
-			if (g_mesh_reported.count(key) > 0)
-				continue;
+			const bool removing = g_rules->under_mesh.remove;
+			if (g_mesh_reported.count(key) > 0 && !removing)
+				continue; // reported once is enough when nothing is removed; with Remove it is tested again to confirm
 			FVector location = ActorLocation(dino);
 
 			FVector hit_location(0, 0, 0);
@@ -1251,10 +1277,25 @@ namespace
 			g_mesh_max_us = (std::max)(g_mesh_max_us, us);
 			++g_mesh_checks;
 			--budget;
-			if (!under)
+
+			bool confirmed = false;
+			if (removing)
+			{
+				uint32_t first = 0;
+				const auto seen = g_mesh_first_below.find(key);
+				if (seen != g_mesh_first_below.end())
+					first = seen->second;
+				confirmed = ConfirmUnderMesh(under, overlapping, g_census_number, first);
+				if (first == 0 || confirmed)
+					g_mesh_first_below.erase(key);
+				else
+					g_mesh_first_below[key] = first;
+			}
+			if (confirmed)
+				RemoveUnderMesh(dino, candidate.class_index, location);
+			if (!under || !g_mesh_reported.insert(key).second)
 				continue;
 
-			g_mesh_reported.insert(key);
 			++g_mesh_suspects;
 			MeshSuspect suspect;
 			suspect.class_index = candidate.class_index;
@@ -1324,7 +1365,7 @@ namespace
 			<< (g_entry_checks > 0 ? g_entry_total_us / g_entry_checks : 0.0) << " us, max " << g_entry_max_us << " us"
 			<< (g_entry_hook_installed ? "" : " (hook not installed)")
 			<< (g_settings.refuse_full_entries ? "" : " (RefuseFullEntries off)") << "\n";
-		out << "Summoned (appeared outside a zone spawn): " << g_summoned.size() << " alive, " << g_summoned_seen
+		out << "Summoned (appeared outside a zone spawn): " << g_summoned.size() << " tracked, " << g_summoned_seen
 			<< " since load; zone spawn calls " << g_zone_spawn_calls
 			<< (g_zone_hook_installed ? "" : " (hook not installed)")
 			<< (g_settings.ignore_summoned ? "" : " (IgnoreSummoned off)") << "\n";
@@ -1469,10 +1510,15 @@ namespace
 			}
 			if (g_rules->under_mesh.enabled)
 			{
-				out << "  under mesh (report only): " << g_mesh_checks << " tested, avg "
+				out << "  under mesh (" << (g_rules->under_mesh.remove ? "removing: below on two censuses" : "report only") << "): "
+					<< g_mesh_checks << " tested, avg "
 					<< (g_mesh_checks > 0 ? g_mesh_total_us / g_mesh_checks : 0.0) << " us, max " << g_mesh_max_us << " us, "
 					<< g_mesh_suspects << " suspects since load";
-				out << "; " << g_mesh_queue.size() << " waiting for this census\n";
+				out << "; " << g_mesh_queue.size() << " waiting for this census";
+				if (g_rules->under_mesh.remove)
+					out << "; " << g_mesh_removal_queued << " queued for removal since load, " << g_mesh_first_below.size()
+						<< " found below once, waiting for a second census";
+				out << "\n";
 				for (const MeshSuspect& suspect : g_mesh_recent)
 				{
 					const int c = suspect.class_index;
@@ -1569,9 +1615,11 @@ namespace
 		const double radius = radius_foundations * kFoundation;
 		struct Row
 		{
-			double distance = 0, dz = 0;
+			double distance = 0;
+			bool under = false;
 			std::string text;
 		};
+		size_t under_count = 0;
 		std::vector<Row> rows;
 		UClass* dino_class = APrimalDinoCharacter::GetPrivateStaticClass();
 		TArray<ULevel*> levels = world->LevelsField();
@@ -1610,13 +1658,17 @@ namespace
 					<< (under ? (overlapping ? "UNDER (overlapping)" : "UNDER (below)") : "clear") << ", hit " << hit_name
 					<< (excluded ? " [map exclusion zone]" : "")
 					<< (g_mesh_reported.count(WeakKey(GetWeakReference(dino))) > 0 ? " [already reported]" : "");
-				rows.push_back({ distance, 0, line.str() });
+				rows.push_back({ distance, under, line.str() });
+				if (under)
+					++under_count;
 			}
 		}
-		std::sort(rows.begin(), rows.end(), [](const Row& x, const Row& y) { return x.distance < y.distance; });
+		// Under first, then nearest first, so a long list never hides a hit.
+		std::sort(rows.begin(), rows.end(), [](const Row& x, const Row& y) { return x.under != y.under ? x.under : x.distance < y.distance; });
 		std::ostringstream out;
 		out << "Under-mesh test on " << rows.size() << " creature(s) within " << radius_foundations << " foundations of "
-			<< static_cast<int>(at.X) << " " << static_cast<int>(at.Y) << " " << static_cast<int>(at.Z) << ":\n";
+			<< static_cast<int>(at.X) << " " << static_cast<int>(at.Y) << " " << static_cast<int>(at.Z) << ": "
+			<< (rows.size() - under_count) << " clear, " << under_count << " under\n";
 		for (size_t i = 0; i < rows.size() && i < 40; ++i)
 			out << "  " << rows[i].text << "\n";
 		if (rows.size() > 40)

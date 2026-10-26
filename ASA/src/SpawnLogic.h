@@ -171,14 +171,33 @@ namespace SpawnControl
 		std::vector<std::string> exclude;
 	};
 
-	// Creatures under the map or inside its geometry, found with the game's own under-mesh test. Report only:
-	// nothing is removed or moved yet.
+	// Creatures under the map or inside its geometry, found with the game's own under-mesh test. Reported
+	// always; removed only with Remove, and only when found below the surface on two separate censuses.
 	struct UnderMeshRule
 	{
 		bool enabled = false;
 		int checks_per_second = 20;        // game under-mesh tests per second, each on one awake creature
+		bool remove = false;
 		std::vector<std::string> exclude;
 	};
+
+	// Under-mesh removal needs two "below" results from different censuses; a creature only clipping a rock
+	// edge ("overlapping") or found below once is never removed. Returns true when this result confirms it.
+	// first_below_census: the census the creature was first found below in, or 0 for none (updated here).
+	inline bool ConfirmUnderMesh(bool under, bool overlapping, uint32_t census, uint32_t& first_below_census)
+	{
+		if (!under || overlapping)
+		{
+			first_below_census = 0;
+			return false;
+		}
+		if (first_below_census == 0)
+		{
+			first_below_census = census;
+			return false;
+		}
+		return census > first_below_census;
+	}
 
 	struct DensitySkip
 	{
@@ -465,7 +484,7 @@ namespace SpawnControl
 			{
 				const nlohmann::json& under = section["UnderMesh"];
 				if (!under.is_object())
-					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond and Exclude; ignored");
+					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove and Exclude; ignored");
 				else
 				{
 					rules.under_mesh.enabled = true;
@@ -474,6 +493,13 @@ namespace SpawnControl
 					if (checks > 200)
 						warnings.push_back(where + "UnderMesh.ChecksPerSecond above 200; using 200");
 					rules.under_mesh.exclude = ReadStrings(under, "Exclude", {}, warnings, where + "UnderMesh.");
+					if (under.contains("Remove"))
+					{
+						if (under["Remove"].is_boolean())
+							rules.under_mesh.remove = under["Remove"].get<bool>();
+						else
+							warnings.push_back(where + "UnderMesh.Remove must be true or false; using false");
+					}
 				}
 			}
 
@@ -572,7 +598,7 @@ namespace SpawnControl
 				if (map.contains("Overlap"))
 					WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
 				if (map.contains("UnderMesh"))
-					WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Exclude" }, where + "UnderMesh.", warnings);
+					WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "Exclude" }, where + "UnderMesh.", warnings);
 			}
 		}
 	}
