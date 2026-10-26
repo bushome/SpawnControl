@@ -51,6 +51,7 @@ namespace
 	const char* const kHookBeginPlay = "APrimalDinoCharacter.BeginPlay()";
 	const char* const kLevelActorsField = "ULevel.Actors2";
 	const wchar_t* const kMapSwitch = L"-SpawnControlMap=";
+	const wchar_t* const kServerKeySwitch = L"-ServerKey=";  // shared with the other plugins
 
 	// A queued creature that keeps turning up near players is removed anyway after this many deferrals.
 	constexpr int kMaxNearPlayerDeferrals = 30;
@@ -314,13 +315,14 @@ namespace
 	// Config
 	// ------------------------------------------------------------------------------------------
 
-	std::string MapSwitchValue()
+	// Value of a -Name=value switch on the server command line, or empty.
+	std::string SwitchValue(const wchar_t* name)
 	{
 		const std::wstring line = GetCommandLineW();
-		const size_t at = line.find(kMapSwitch);
+		const size_t at = line.find(name);
 		if (at == std::wstring::npos)
 			return {};
-		size_t start = at + wcslen(kMapSwitch);
+		size_t start = at + wcslen(name);
 		size_t end = start;
 		if (start < line.size() && line[start] == L'"')
 		{
@@ -350,11 +352,17 @@ namespace
 		g_map_name = CurrentMapName();
 		const bool was_known = g_map_known;
 		g_map_known = !g_map_name.empty();
-		const std::string forced = MapSwitchValue();
+		const std::string forced = SwitchValue(kMapSwitch);
+		const std::string server_key = SwitchValue(kServerKeySwitch);
 		if (!forced.empty())
 		{
 			g_rules = FindMapRules(g_settings, forced);
 			g_section_source = "-SpawnControlMap=" + forced;
+		}
+		else if (!server_key.empty() && FindMapRules(g_settings, server_key) != nullptr)
+		{
+			g_rules = FindMapRules(g_settings, server_key);
+			g_section_source = "-ServerKey=" + server_key;
 		}
 		else
 		{
@@ -362,7 +370,8 @@ namespace
 			g_section_source = "map " + g_map_name;
 		}
 		if (g_map_known && !was_known)
-			Log::GetLog()->info("Map {}: using section {}", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"));
+			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
+				g_section_source);
 
 		for (ClassEntry& entry : g_classes)
 			entry.rule = ResolveClass(g_settings, g_rules, entry.info);

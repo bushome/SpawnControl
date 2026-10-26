@@ -22,8 +22,8 @@ of full spawn entries, removal queue, rolling refresh (not yet tested) and the `
 
 | Folder | Game | Server API (submodule) | Map section picked by |
 |---|---|---|---|
-| [`ASA`](ASA/README.md) | ARK: Survival Ascended | [AsaApi](https://github.com/ArkServerApi/AsaApi) at `ASA/extern/AsaApi` | map name (`_WP` optional) or `-SpawnControlMap=` |
-| [`ASE`](ASE/README.md) | ARK: Survival Evolved | [ArkServerApi (AseApi)](https://github.com/ArkServerApi/AseApi) at `ASE/extern/AseApi` | map name or `-SpawnControlMap=` |
+| [`ASA`](ASA/README.md) | ARK: Survival Ascended | [AsaApi](https://github.com/ArkServerApi/AsaApi) at `ASA/extern/AsaApi` | `-SpawnControlMap=`, `-ServerKey=` or map name (`_WP` optional) |
+| [`ASE`](ASE/README.md) | ARK: Survival Evolved | [ArkServerApi (AseApi)](https://github.com/ArkServerApi/AseApi) at `ASE/extern/AseApi` | `-SpawnControlMap=`, `-ServerKey=` or map name |
 
 Each folder is a self-contained Visual Studio solution. Clone with submodules:
 

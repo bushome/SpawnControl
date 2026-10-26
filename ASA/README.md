@@ -136,7 +136,10 @@ mission-owned). Reporting only. Shipped: `"Thralls": "Thrall_Character_BP_Base_C
 
 One section per map, picked by the map name the server reports (case-insensitive; ASA's `_WP` suffix may be
 left off). `-SpawnControlMap=<section>` on the server command line picks a section regardless of map, for a
-test server that should use another map's rules.
+test server that should use another map's rules. Without it, a section named after the `-ServerKey=` value
+on the command line (the key the other plugins use) wins over the map name when one exists, so sections can
+be keyed the same way across plugins. `SpawnControl.List` and the "Map …: using section …" log line say
+which one was picked and why.
 
 | Setting | Meaning |
 |---|---|

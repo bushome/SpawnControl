@@ -50,8 +50,9 @@
     "Thralls": "Thrall_Character_BP_Base_C"
   },
 
-  // One section per map. The section is picked by map name (ASA's "_WP" suffix may be left off), or by
-  // -SpawnControlMap=<section> on the server command line. SpawnControl.List shows which one is in use.
+  // One section per map. The section is picked by -SpawnControlMap=<section> on the server command line,
+  // else by a section named after the -ServerKey= value when there is one, else by map name (ASA's "_WP"
+  // suffix may be left off). SpawnControl.List shows which one is in use.
   //
   // Class keys: a short class name (Otter_Character_BP_C) matches every class of that name; a full path
   // as ListDinos prints it (/Game/.../Otter_Character_BP.Otter_Character_BP_C) matches exactly one. For
