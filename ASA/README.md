@@ -137,7 +137,7 @@ mission-owned). Reporting only. Shipped: `"Thralls": "Thrall_Character_BP_Base_C
 One section per map, picked by the map name the server reports (case-insensitive; ASA's `_WP` suffix may be
 left off). `-SpawnControlMap=<section>` on the server command line picks a section regardless of map, for a
 test server that should use another map's rules. Without it, a section named after the `-ServerKey=` value
-on the command line (the key the other plugins use) wins over the map name when one exists, so sections can
+on the command line, or `?ServerKey=` in the map URL (any case, as the other plugins read it), wins over the map name when one exists, so sections can
 be keyed the same way across plugins. `SpawnControl.List` and the "Map …: using section …" log line say
 which one was picked and why.
 
@@ -160,7 +160,7 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 
 | Command | What it does |
 |---|---|
-| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class with its count, every group, the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
+| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class and every group with its count now (the last census minus what it queued for removal, plus spawns since), the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
 | `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. |
 
 ## Troubleshooting

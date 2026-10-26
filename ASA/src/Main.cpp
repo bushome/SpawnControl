@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <cwchar>
+#include <cwctype>
 #include <deque>
 #include <fstream>
 #include <sstream>
@@ -315,15 +316,20 @@ namespace
 	// Config
 	// ------------------------------------------------------------------------------------------
 
-	// Value of a -Name=value switch on the server command line, or empty.
+	// Value of a -Name=value switch on the server command line, or empty. The name matches in any case
+	// (-ServerKey=, -serverkey=), the same way the other plugins read it.
 	std::string SwitchValue(const wchar_t* name)
 	{
 		const std::wstring line = GetCommandLineW();
-		const size_t at = line.find(name);
+		std::wstring lower = line;
+		std::wstring needle = name;
+		std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+		std::transform(needle.begin(), needle.end(), needle.begin(), ::towlower);
+		const size_t at = lower.find(needle);
 		if (at == std::wstring::npos)
 			return {};
-		size_t start = at + wcslen(name);
-		size_t end = start;
+		size_t start = at + needle.size();
+		size_t end = std::wstring::npos;
 		if (start < line.size() && line[start] == L'"')
 		{
 			++start;
@@ -331,7 +337,7 @@ namespace
 		}
 		else
 		{
-			end = line.find(L' ', start);
+			end = line.find_first_of(L" \t\"?", start);
 		}
 		return AsaApi::Tools::Utf8Encode(line.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
 	}
@@ -353,7 +359,10 @@ namespace
 		const bool was_known = g_map_known;
 		g_map_known = !g_map_name.empty();
 		const std::string forced = SwitchValue(kMapSwitch);
-		const std::string server_key = SwitchValue(kServerKeySwitch);
+		// -ServerKey=x as a flag, or ?ServerKey=x in the map URL; the other plugins accept both.
+		std::string server_key = SwitchValue(kServerKeySwitch);
+		if (server_key.empty())
+			server_key = SwitchValue(L"?ServerKey=");
 		if (!forced.empty())
 		{
 			g_rules = FindMapRules(g_settings, forced);
@@ -1011,13 +1020,18 @@ namespace
 			return out.str();
 		}
 
+		// Ruled classes and groups show the live count: the last census, minus what it queued for removal,
+		// plus spawns since. A census count over a limit would only show what is already on its way out.
+		const bool live = g_counts_ready;
+		auto count_now = [&](size_t c) { return live && c < g_class_counts.size() ? g_class_counts[c] : g_last.wild_by_class[c]; };
+		out << (live ? "Ruled classes (now, after queued removals):\n" : "Ruled classes (last census):\n");
 		for (size_t c = 0; c < g_classes.size() && c < g_last.wild_by_class.size(); ++c)
 		{
 			const ClassRule& rule = g_classes[c].rule;
-			if (rule.blocked && g_last.wild_by_class[c] > 0)
-				out << "  " << g_classes[c].info.short_name << ": " << g_last.wild_by_class[c] << " [blocked]\n";
+			if (rule.blocked && count_now(c) > 0)
+				out << "  " << g_classes[c].info.short_name << ": " << count_now(c) << " [blocked]\n";
 			else if (rule.limit != kNoLimit)
-				out << "  " << g_classes[c].info.short_name << ": " << g_last.wild_by_class[c] << " / " << rule.limit << "\n";
+				out << "  " << g_classes[c].info.short_name << ": " << count_now(c) << " / " << rule.limit << "\n";
 		}
 		if (g_rules != nullptr)
 		{
@@ -1028,7 +1042,7 @@ namespace
 				{
 					const auto& member_of = g_classes[c].rule.groups;
 					if (std::find(member_of.begin(), member_of.end(), static_cast<int>(g)) != member_of.end())
-						total += g_last.wild_by_class[c];
+						total += count_now(c);
 				}
 				out << "  group " << g_rules->groups[g].name << ": " << total << " / " << g_rules->groups[g].max << "\n";
 			}
