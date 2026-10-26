@@ -354,6 +354,15 @@ static void TestDensity()
 	thrall.chain = { "Thrall_Archer_BP_C", "Thrall_Character_BP_Base_C", "PrimalDinoCharacter" };
 	CHECK(ResolveClass(settings, &thrall_map, thrall).density.empty());
 	CHECK(ResolveClass(settings, &thrall_map, bary).density.size() == 1);
+
+	// Exclude by part of a path: one entry for a whole folder.
+	thrall_map.density[0].exclude = { "/ZombieDino/" };
+	ClassInfo corrupted;
+	corrupted.short_name = "Stego_Character_BP_Corrupted_Zombie_C";
+	corrupted.path = "/Game/LostColony/Dinos/ZombieDino/Stego/Stego_Character_BP_Corrupted_Zombie.Stego_Character_BP_Corrupted_Zombie_C";
+	corrupted.chain = { corrupted.short_name, "Stego_Character_BP_C", "Dino_Character_BP_C", "PrimalDinoCharacter" };
+	CHECK(ResolveClass(settings, &thrall_map, corrupted).density.empty());
+	CHECK(ResolveClass(settings, &thrall_map, bary).density.size() == 1);
 }
 
 static void TestOverOnSpawn()

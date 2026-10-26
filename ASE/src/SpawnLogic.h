@@ -119,7 +119,7 @@ namespace SpawnControl
 		double size = 0;                   // Unreal units
 		bool all = false;                  // "*": every wild creature that is not protected
 		std::vector<std::string> classes;  // counted together; the key itself when Classes is not given
-		std::vector<std::string> exclude;  // never counted by this rule; a short name also matches parent classes
+		std::vector<std::string> exclude;  // never counted: a short name also matches derived classes, a path part any path containing it
 	};
 
 	// Places where density rules do not apply: a horizontal circle around a point.
@@ -548,7 +548,7 @@ namespace SpawnControl
 			for (const std::string& key : rules->density[d].classes)
 				member = member || KeyMatches(key, info);
 			for (const std::string& key : rules->density[d].exclude)
-				member = member && !KeyMatches(key, info) && !(!IsPathKey(key) && ChainContains(info, key));
+				member = member && !(IsPathKey(key) ? ContainsNoCase(info.path, key) : KeyMatches(key, info) || ChainContains(info, key));
 			if (member)
 				rule.density.push_back(static_cast<int>(d));
 		}
