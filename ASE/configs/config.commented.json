@@ -101,11 +101,12 @@
       },
       // Clump caps: no more than Max of a class in any cube AreaInFoundations across (300 units per
       // foundation). The key is a class, or a name with "Classes" to count several together, or "*" for
-      // every wild creature. "Exclude" keeps classes out of a rule (packs meant to be dense). Checked each
+      // every wild creature. "Exclude" keeps classes out of a rule (packs meant to be dense); a short name
+      // there also covers every class derived from it, e.g. every thrall. Checked each
       // census; the over-full spots are thinned, farthest from players first.
       "Density": {
         "Baryonyx_Character_BP_C": { "Max": 8, "AreaInFoundations": 30 },
-        "*": { "Max": 40, "AreaInFoundations": 30, "Exclude": [ "Zombie_Character_BP_Skinny_C" ] }
+        "*": { "Max": 40, "AreaInFoundations": 30, "Exclude": [ "Thrall_Character_BP_Base_C" ] }
       },
       // Where density rules do not apply: creatures the game spawned in caves or boss areas (ASA only), and
       // horizontal circles around a point (x, y from "ccc"; z is ignored), e.g. a city or a corrupted zone.

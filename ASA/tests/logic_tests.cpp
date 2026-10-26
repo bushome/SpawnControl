@@ -342,6 +342,18 @@ static void TestDensity()
 	nameless.path = "/Game/Aberration/Nameless.Nameless_C";
 	CHECK(ResolveClass(settings, &skip_map, nameless).density.empty());
 	CHECK(ResolveClass(settings, &skip_map, bary).density.size() == 1);
+
+	// Exclude by parent class: one entry keeps every thrall out.
+	MapRules thrall_map;
+	thrall_map.density.resize(1);
+	thrall_map.density[0].all = true;
+	thrall_map.density[0].exclude = { "Thrall_Character_BP_Base_C" };
+	ClassInfo thrall;
+	thrall.short_name = "Thrall_Archer_BP_C";
+	thrall.path = "/Game/LostColony/Thrall/Thrall_Archer_BP.Thrall_Archer_BP_C";
+	thrall.chain = { "Thrall_Archer_BP_C", "Thrall_Character_BP_Base_C", "PrimalDinoCharacter" };
+	CHECK(ResolveClass(settings, &thrall_map, thrall).density.empty());
+	CHECK(ResolveClass(settings, &thrall_map, bary).density.size() == 1);
 }
 
 static void TestOverOnSpawn()
