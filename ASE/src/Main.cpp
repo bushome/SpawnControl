@@ -54,6 +54,7 @@ namespace
 
 	const char* const kCmdReload = "SpawnControl.Reload";
 	const char* const kCmdList = "SpawnControl.List";
+	const char* const kCmdMeshHere = "SpawnControl.MeshHere";
 	const char* const kTimerId = "SpawnControl.Timer";
 	const char* const kHookEntry = "ANPCZoneManager.IsValidNPCEntry";
 	const char* const kHookBeginPlay = "APrimalDinoCharacter.BeginPlay";
@@ -1559,6 +1560,92 @@ namespace
 		return player;
 	}
 
+	// MeshHere: the game's under-mesh test on every creature near the admin, right now, whatever its state.
+	std::string MeshHereText(const FVector& at, int radius_foundations)
+	{
+		UWorld* world = World();
+		if (world == nullptr)
+			return "No world.\n";
+		const double radius = radius_foundations * kFoundation;
+		struct Row
+		{
+			double distance = 0, dz = 0;
+			std::string text;
+		};
+		std::vector<Row> rows;
+		UClass* dino_class = APrimalDinoCharacter::GetPrivateStaticClass();
+		TArray<ULevel*> levels = world->LevelsField();
+		for (int l = 0; l < levels.Num(); ++l)
+		{
+			ULevel* level = levels[l];
+			if (level == nullptr)
+				continue;
+			TArray<AActor*>& actors = *GetNativePointerField<TArray<AActor*>*>(level, kLevelActorsField);
+			for (int a = 0; a < actors.Num(); ++a)
+			{
+				AActor* actor = actors[a];
+				if (actor == nullptr || !actor->IsA(dino_class))
+					continue;
+				APrimalDinoCharacter* dino = static_cast<APrimalDinoCharacter*>(actor);
+				FVector location = ActorLocation(dino);
+				const double distance = std::sqrt(DistanceSquared(location, at));
+				if (distance > radius)
+					continue;
+
+			const bool excluded = false;
+				FVector hit_location(0, 0, 0);
+				bool overlapping = false;
+				UActorComponent* hit = nullptr;
+				const bool under = UVictoryCore::IsUnderMesh(dino, &hit_location, &overlapping, &hit, false, 0.0f);
+				UObject* hit_object = reinterpret_cast<UObject*>(hit);
+				const std::string hit_name = hit_object != nullptr && hit_object->ClassField() != nullptr ?
+					hit_object->ClassField()->NameField().ToString().ToString() : "nothing";
+				const Kind kind = Classify(dino);
+				const char* kind_name = kind == Kind::Wild ? "wild" : kind == Kind::Mission ? "mission" : kind == Kind::Summoned ? "summoned" : "tamed/dead";
+				const int class_index = ClassIndexFor(dino->ClassField());
+				std::ostringstream line;
+				line << g_classes[class_index].info.short_name << " " << static_cast<int>(distance / kFoundation) << " fdn, "
+					<< static_cast<int>((static_cast<double>(location.Z) - static_cast<double>(at.Z)) / kFoundation) << " fdn up/down: "
+					<< kind_name << (dino->bStasised()() ? ", in stasis" : ", awake") << " -> "
+					<< (under ? (overlapping ? "UNDER (overlapping)" : "UNDER (below)") : "clear") << ", hit " << hit_name
+					<< (excluded ? " [map exclusion zone]" : "")
+					<< (g_mesh_reported.count(WeakKey(GetWeakReference(dino))) > 0 ? " [already reported]" : "");
+				rows.push_back({ distance, 0, line.str() });
+			}
+		}
+		std::sort(rows.begin(), rows.end(), [](const Row& x, const Row& y) { return x.distance < y.distance; });
+		std::ostringstream out;
+		out << "Under-mesh test on " << rows.size() << " creature(s) within " << radius_foundations << " foundations of "
+			<< static_cast<int>(at.X) << " " << static_cast<int>(at.Y) << " " << static_cast<int>(at.Z) << ":\n";
+		for (size_t i = 0; i < rows.size() && i < 40; ++i)
+			out << "  " << rows[i].text << "\n";
+		if (rows.size() > 40)
+			out << "  ... " << (rows.size() - 40) << " more\n";
+		return out.str();
+	}
+
+	void ConsoleMeshHere(APlayerController* controller, FString* command, bool)
+	{
+		if (AShooterPlayerController* admin = AdminFrom(controller))
+		{
+			int radius = 30;
+			const std::string argument = CommandArgument(command);
+			if (!argument.empty())
+			{
+				try
+				{
+					radius = (std::max)(1, (std::min)(std::stoi(argument), 200));
+				}
+				catch (const std::exception&)
+				{
+				}
+			}
+			const std::string text = MeshHereText(ArkApi::IApiUtils::GetPosition(admin), radius);
+			Log::GetLog()->info("MeshHere:\n{}", text);
+			SendAdmin(admin, text);
+		}
+	}
+
 	void ConsoleReload(APlayerController* controller, FString*, bool)
 	{
 		if (AShooterPlayerController* admin = AdminFrom(controller))
@@ -1625,6 +1712,7 @@ extern "C" __declspec(dllexport) void Plugin_Init()
 
 	ArkApi::GetCommands().AddConsoleCommand(kCmdReload, &ConsoleReload);
 	ArkApi::GetCommands().AddConsoleCommand(kCmdList, &ConsoleList);
+	ArkApi::GetCommands().AddConsoleCommand(kCmdMeshHere, &ConsoleMeshHere);
 	ArkApi::GetCommands().AddRconCommand(kCmdReload, &RconReload);
 	ArkApi::GetCommands().AddRconCommand(kCmdList, &RconList);
 	ArkApi::GetCommands().AddOnTimerCallback(kTimerId, &SafeTimer);
@@ -1636,6 +1724,7 @@ extern "C" __declspec(dllexport) void Plugin_Unload()
 	ArkApi::GetCommands().RemoveOnTimerCallback(kTimerId);
 	ArkApi::GetCommands().RemoveConsoleCommand(kCmdReload);
 	ArkApi::GetCommands().RemoveConsoleCommand(kCmdList);
+	ArkApi::GetCommands().RemoveConsoleCommand(kCmdMeshHere);
 	ArkApi::GetCommands().RemoveRconCommand(kCmdReload);
 	ArkApi::GetCommands().RemoveRconCommand(kCmdList);
 
