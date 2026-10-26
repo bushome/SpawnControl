@@ -8,11 +8,13 @@
 // folders; keep the two copies in sync. See tests/logic_tests.cpp.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -106,12 +108,26 @@ namespace SpawnControl
 		std::vector<std::string> classes;
 	};
 
+	constexpr double kFoundation = 300.0;      // one foundation in Unreal units
+	constexpr int kMaxDensityArea = 200;       // foundations
+
+	// A clump cap: no more than max of these classes in any cube size across.
+	struct DensityRule
+	{
+		std::string name;                  // the key under Density
+		int max = 0;
+		double size = 0;                   // Unreal units
+		bool all = false;                  // "*": every wild creature that is not protected
+		std::vector<std::string> classes;  // counted together; the key itself when Classes is not given
+	};
+
 	struct MapRules
 	{
 		std::string name;                               // section name as written in config.json
 		std::vector<std::string> block;
 		std::vector<std::pair<std::string, int>> limits; // class key -> max wild count
 		std::vector<GroupRule> groups;
+		std::vector<DensityRule> density;
 	};
 
 	struct ReportFamily
@@ -255,6 +271,46 @@ namespace SpawnControl
 					}
 				}
 			}
+
+			if (section.contains("Density"))
+			{
+				const nlohmann::json& density = section["Density"];
+				if (!density.is_object())
+					warnings.push_back(where + "Density must be an object of class or name -> { Max, AreaInFoundations }; ignored");
+				else
+				{
+					for (auto it = density.begin(); it != density.end(); ++it)
+					{
+						const std::string density_where = where + "Density." + it.key() + ".";
+						if (!it.value().is_object())
+						{
+							warnings.push_back(where + "Density." + it.key() + " must be an object with Max and AreaInFoundations; skipped");
+							continue;
+						}
+						DensityRule rule;
+						rule.name = it.key();
+						rule.all = it.key() == "*";
+						rule.max = ReadInt(it.value(), "Max", -1, 1, warnings);
+						int area = ReadInt(it.value(), "AreaInFoundations", -1, 1, warnings);
+						rule.classes = ReadStrings(it.value(), "Classes", {}, warnings, density_where);
+						if (rule.max < 1 || area < 1)
+						{
+							warnings.push_back(density_where + "Max and AreaInFoundations must both be 1 or more; skipped");
+							continue;
+						}
+						if (area > kMaxDensityArea)
+						{
+							warnings.push_back(density_where + "AreaInFoundations above " + std::to_string(kMaxDensityArea) +
+								"; using " + std::to_string(kMaxDensityArea));
+							area = kMaxDensityArea;
+						}
+						if (!rule.all && rule.classes.empty())
+							rule.classes.push_back(it.key());
+						rule.size = area * kFoundation;
+						rules.density.push_back(std::move(rule));
+					}
+				}
+			}
 			return rules;
 		}
 	}
@@ -361,6 +417,7 @@ namespace SpawnControl
 		bool blocked = false;
 		int limit = kNoLimit;
 		std::vector<int> groups;   // indices into MapRules::groups
+		std::vector<int> density;  // indices into MapRules::density
 		int report_family = -1;    // index into Settings::report_families
 	};
 
@@ -421,12 +478,21 @@ namespace SpawnControl
 				}
 			}
 		}
+
+		for (size_t d = 0; d < rules->density.size(); ++d)
+		{
+			bool member = rules->density[d].all;
+			for (const std::string& key : rules->density[d].classes)
+				member = member || KeyMatches(key, info);
+			if (member)
+				rule.density.push_back(static_cast<int>(d));
+		}
 		return rule;
 	}
 
 	inline bool HasAnyRule(const ClassRule& rule)
 	{
-		return rule.blocked || rule.limit != kNoLimit || !rule.groups.empty();
+		return rule.blocked || rule.limit != kNoLimit || !rule.groups.empty() || !rule.density.empty();
 	}
 
 	// ------------------------------------------------------------------------------------------
@@ -439,6 +505,7 @@ namespace SpawnControl
 		size_t id = 0;               // caller's handle (index into its own list)
 		int class_index = 0;         // index into the rules vector passed to PlanRemovals
 		double player_distance = 0;  // to the nearest player; larger = removed sooner
+		double x = 0, y = 0, z = 0;  // where it is, for density rules
 	};
 
 	struct Plan
@@ -449,14 +516,19 @@ namespace SpawnControl
 		size_t blocked = 0;
 		size_t over_limit = 0;
 		size_t over_group = 0;
+		size_t too_dense = 0;
 	};
 
 	// Which creatures to remove so every block, limit and group limit holds. Blocked creatures come
 	// first; within each rule the creatures farthest from any player go first, so removals happen where
 	// nobody sees them. A creature is only ever picked once. Group limits take from whichever member
 	// class has the most left, so 250 vanilla + 250 modded otters capped at 200 end near 100 + 100.
+	//
+	// Density rules run last, on what the other rules leave: no cube AreaInFoundations across may hold
+	// more than Max of a rule's classes. Checked on two grids, the second shifted by half a cube, so a
+	// clump on a cube edge is still caught; the farthest from players in an over-full cube go first.
 	inline Plan PlanRemovals(const std::vector<ClassRule>& rules, const std::vector<GroupRule>& groups,
-		const std::vector<Creature>& creatures)
+		const std::vector<Creature>& creatures, const std::vector<DensityRule>& density = {})
 	{
 		Plan plan;
 		plan.class_counts.assign(rules.size(), 0);
@@ -490,16 +562,23 @@ namespace SpawnControl
 			std::reverse(list.begin(), list.end()); // farthest at the back, so taking is pop_back
 		}
 
-		auto take = [&](size_t c)
+		std::vector<bool> removed(creatures.size(), false);
+		auto uncount = [&](size_t c)
 			{
-				plan.remove.push_back(remaining[c].back()->id);
-				remaining[c].pop_back();
 				--plan.class_counts[c];
 				for (int g : rules[c].groups)
 				{
 					if (valid_group(g))
 						--plan.group_counts[g];
 				}
+			};
+		auto take = [&](size_t c)
+			{
+				const Creature* creature = remaining[c].back();
+				removed[static_cast<size_t>(creature - creatures.data())] = true;
+				plan.remove.push_back(creature->id);
+				remaining[c].pop_back();
+				uncount(c);
 			};
 
 		// 1. Blocked classes: every one.
@@ -540,6 +619,65 @@ namespace SpawnControl
 					break;
 				take(best);
 				++plan.over_group;
+			}
+		}
+
+		// 4. Density.
+		for (size_t d = 0; d < density.size(); ++d)
+		{
+			const DensityRule& rule = density[d];
+			std::vector<size_t> members;
+			for (size_t i = 0; i < creatures.size(); ++i)
+			{
+				const int c = creatures[i].class_index;
+				if (removed[i] || c < 0 || static_cast<size_t>(c) >= rules.size() || rules[c].is_protected)
+					continue;
+				const auto& member_of = rules[c].density;
+				if (std::find(member_of.begin(), member_of.end(), static_cast<int>(d)) != member_of.end())
+					members.push_back(i);
+			}
+			if (members.size() <= static_cast<size_t>(rule.max) || rule.size <= 0)
+				continue;
+
+			// No more than max in any cube the rule's size across. A second grid shifted by half a cube
+			// catches clumps that straddle a cube edge; within a full cube the farthest from players go first.
+			auto cell_key = [](double v, double size, double shift)
+				{
+					return static_cast<int64_t>(std::floor((v + shift) / size));
+				};
+			auto key3 = [](int64_t x, int64_t y, int64_t z)
+				{
+					constexpr int64_t offset = int64_t(1) << 20, mask = (int64_t(1) << 21) - 1;
+					return (static_cast<uint64_t>((x + offset) & mask) << 42) | (static_cast<uint64_t>((y + offset) & mask) << 21) |
+						static_cast<uint64_t>((z + offset) & mask);
+				};
+			for (const double shift : { 0.0, rule.size / 2 })
+			{
+				std::unordered_map<uint64_t, std::vector<size_t>> cells;
+				for (size_t i : members)
+				{
+					if (removed[i])
+						continue;
+					const Creature& c = creatures[i];
+					cells[key3(cell_key(c.x, rule.size, shift), cell_key(c.y, rule.size, shift), cell_key(c.z, rule.size, shift))].push_back(i);
+				}
+				for (auto& [key, list] : cells)
+				{
+					if (list.size() <= static_cast<size_t>(rule.max))
+						continue;
+					std::stable_sort(list.begin(), list.end(), [&](size_t a, size_t b)
+						{
+							return creatures[a].player_distance > creatures[b].player_distance;
+						});
+					for (size_t k = 0; k < list.size() - static_cast<size_t>(rule.max); ++k)
+					{
+						const Creature& creature = creatures[list[k]];
+						removed[list[k]] = true;
+						plan.remove.push_back(creature.id);
+						uncount(static_cast<size_t>(creature.class_index));
+						++plan.too_dense;
+					}
+				}
 			}
 		}
 		return plan;

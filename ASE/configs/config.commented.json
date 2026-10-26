@@ -98,6 +98,13 @@
           "Max": 200,
           "Classes": [ "Otter_Character_BP_C", "S-Otter_Character_BP_C" ]
         }
+      },
+      // Clump caps: no more than Max of a class in any cube AreaInFoundations across (300 units per
+      // foundation). The key is a class, or a name with "Classes" to count several together, or "*" for
+      // every wild creature. Checked each census; the over-full spots are thinned, farthest from players first.
+      "Density": {
+        "Baryonyx_Character_BP_C": { "Max": 8, "AreaInFoundations": 30 },
+        "*": { "Max": 40, "AreaInFoundations": 30 }
       }
     }
   }

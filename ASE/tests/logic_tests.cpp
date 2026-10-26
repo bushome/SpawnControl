@@ -224,6 +224,98 @@ static void TestPlan()
 	CHECK(PlanRemovals(rules, groups, odd).remove.empty());
 }
 
+static void TestDensity()
+{
+	// Parsing: a class, a named mix, "*", and bad entries.
+	const Settings parsed = Parse(R"({ "Maps": { "M": { "Density": {
+		"Bary_C": { "Max": 8, "AreaInFoundations": 30 },
+		"Clump": { "Max": 5, "AreaInFoundations": 10, "Classes": [ "A_C", "B_C" ] },
+		"*": { "Max": 40, "AreaInFoundations": 999 },
+		"Bad": { "Max": 0, "AreaInFoundations": 10 },
+		"Worse": 5 } } } })");
+	const MapRules& map = parsed.maps.front();
+	CHECK(map.density.size() == 3);
+	CHECK(map.density[0].name == "*" || map.density[0].name == "Bary_C" || map.density[0].name == "Clump");
+	for (const DensityRule& rule : map.density)
+	{
+		if (rule.name == "Bary_C")
+			CHECK(rule.max == 8 && rule.size == 30 * kFoundation && rule.classes.size() == 1 && !rule.all);
+		if (rule.name == "Clump")
+			CHECK(rule.classes.size() == 2 && rule.size == 10 * kFoundation);
+		if (rule.name == "*")
+			CHECK(rule.all && rule.size == kMaxDensityArea * kFoundation);
+	}
+	CHECK(parsed.warnings.size() == 4); // area capped, Bad: Max and skipped, Worse skipped
+
+	// Resolve: membership by key, Classes and "*"; density alone counts as a rule.
+	MapRules rules_map;
+	rules_map.density.resize(2);
+	rules_map.density[0].classes = { "Bary_C" };
+	rules_map.density[1].all = true;
+	Settings settings;
+	ClassInfo bary;
+	bary.short_name = "Bary_C";
+	bary.path = "/Game/Bary.Bary_C";
+	bary.chain = { "Bary_C" };
+	const ClassRule bary_rule = ResolveClass(settings, &rules_map, bary);
+	CHECK(bary_rule.density.size() == 2 && HasAnyRule(bary_rule));
+	ClassInfo mission;
+	mission.short_name = "M_C";
+	mission.path = "/Game/Missions/M.M_C";
+	CHECK(ResolveClass(settings, &rules_map, mission).density.empty()); // protected
+
+	// Planning: a clump of 10 at one spot, 3 strays far apart, max 4 per 1000-unit cube.
+	std::vector<ClassRule> rules(2);
+	rules[0].density = { 0 };
+	rules[1].density = { 0 };
+	rules[1].limit = 100;
+	std::vector<DensityRule> density(1);
+	density[0].max = 4;
+	density[0].size = 1000;
+	std::vector<Creature> creatures;
+	auto add = [&](int cls, double x, double y, double distance)
+		{
+			Creature c;
+			c.id = creatures.size();
+			c.class_index = cls;
+			c.player_distance = distance;
+			c.x = x;
+			c.y = y;
+			creatures.push_back(c);
+		};
+	for (int i = 0; i < 10; ++i) add(i % 2, 10.0 * i, 0, 100.0 * i); // ids 0-9, one clump
+	add(0, 50000, 0, 1); add(0, 0, 50000, 1); add(1, -50000, 0, 1);  // ids 10-12, alone
+	const Plan plan = PlanRemovals(rules, {}, creatures, density);
+	CHECK(plan.too_dense == 6);                    // the clump ends at 4
+	CHECK(plan.class_counts[0] + plan.class_counts[1] == 7);
+	for (size_t id : plan.remove)
+		CHECK(id < 10);                            // strays never touched
+	CHECK(std::find(plan.remove.begin(), plan.remove.end(), size_t(9)) != plan.remove.end()); // farthest from players first
+	CHECK(std::find(plan.remove.begin(), plan.remove.end(), size_t(0)) == plan.remove.end()); // nearest stays
+
+	// A clump straddling a cube edge (x = 990 and 1010) is still capped by the shifted grid.
+	std::vector<Creature> edge;
+	for (int i = 0; i < 10; ++i)
+	{
+		Creature c; c.id = edge.size(); c.class_index = 0; c.x = (i % 2 == 0) ? 990 : 1010; c.y = 100 + i; edge.push_back(c);
+	}
+	CHECK(PlanRemovals(rules, {}, edge, density).too_dense == 6);
+
+	// Two clumps a cube and a half apart are separate; each keeps its max.
+	std::vector<Creature> two;
+	for (int i = 0; i < 6; ++i)
+	{
+		Creature c; c.id = two.size(); c.class_index = 0; c.x = 0; c.y = i; two.push_back(c);
+	}
+	for (int i = 0; i < 6; ++i)
+	{
+		Creature c; c.id = two.size(); c.class_index = 0; c.x = 2500; c.y = i; two.push_back(c);
+	}
+	const Plan split = PlanRemovals(rules, {}, two, density);
+	CHECK(split.too_dense == 4);
+	CHECK(PlanRemovals(rules, {}, two).remove.empty()); // no density rules, nothing to do
+}
+
 static void TestOverOnSpawn()
 {
 	std::vector<GroupRule> groups(1);
@@ -352,6 +444,7 @@ int main(int argc, char** argv)
 	TestMapLookup();
 	TestResolve();
 	TestPlan();
+	TestDensity();
 	TestOverOnSpawn();
 	TestIsFull();
 	TestRefresh();

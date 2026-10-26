@@ -83,6 +83,7 @@ namespace
 		TWeakObjectPtr<APrimalDinoCharacter> creature;
 		int class_index = 0;
 		double player_distance = 0;
+		double x = 0, y = 0, z = 0;
 	};
 
 	struct Report
@@ -93,6 +94,7 @@ namespace
 		size_t wild = 0;
 		size_t mission = 0;
 		size_t summoned = 0;                  // wild, summoned by another creature, outside the rules
+		size_t too_dense = 0;                 // planned by density rules
 		std::vector<int> summoned_by_class;   // the summoned part of wild_by_class
 		std::vector<int> wild_by_class;       // every class, protected included
 		std::vector<int> mission_by_class;
@@ -727,10 +729,14 @@ namespace
 		if (!HasAnyRule(rule) || rule.is_protected)
 			return;
 
+		const FVector location = dino->GetLocation();
 		CensusItem item;
 		item.creature = GetWeakReference(dino);
 		item.class_index = class_index;
-		item.player_distance = NearestPlayerDistance(dino->GetLocation(), g_player_positions);
+		item.player_distance = NearestPlayerDistance(location, g_player_positions);
+		item.x = static_cast<double>(location.X);
+		item.y = static_cast<double>(location.Y);
+		item.z = static_cast<double>(location.Z);
 		g_census_items.push_back(item);
 	}
 
@@ -785,11 +791,16 @@ namespace
 		std::vector<Creature> creatures;
 		creatures.reserve(g_census_items.size());
 		for (size_t i = 0; i < g_census_items.size(); ++i)
-			creatures.push_back({ i, g_census_items[i].class_index, g_census_items[i].player_distance });
+		{
+			const CensusItem& item = g_census_items[i];
+			creatures.push_back({ i, item.class_index, item.player_distance, item.x, item.y, item.z });
+		}
 
 		static const std::vector<GroupRule> no_groups;
+		static const std::vector<DensityRule> no_density;
 		const std::vector<GroupRule>& groups = g_rules != nullptr ? g_rules->groups : no_groups;
-		const Plan plan = PlanRemovals(rules, groups, creatures);
+		const std::vector<DensityRule>& density = g_rules != nullptr ? g_rules->density : no_density;
+		const Plan plan = PlanRemovals(rules, groups, creatures, density);
 
 		// Live counts start from what each rule leaves after the planned removals.
 		g_class_counts.assign(g_classes.size(), 0);
@@ -819,6 +830,7 @@ namespace
 		g_building.blocked = plan.blocked;
 		g_building.over_limit = plan.over_limit;
 		g_building.over_group = plan.over_group;
+		g_building.too_dense = plan.too_dense;
 		g_building.wild_by_class.resize(g_classes.size(), 0);
 		g_building.mission_by_class.resize(g_classes.size(), 0);
 		g_building.summoned_by_class.resize(g_classes.size(), 0);
@@ -829,9 +841,9 @@ namespace
 		PlanRefreshFromCensus();
 
 		if (plan.remove.size() > 0)
-			Log::GetLog()->info("Census: {} wild ({} summoned), {} mission; {} over the rules ({} blocked, {} over limit, {} over group), "
-				"{} newly queued, queue {}", g_last.wild, g_last.summoned, g_last.mission, plan.remove.size(), plan.blocked, plan.over_limit,
-				plan.over_group, newly_queued, g_queue.size());
+			Log::GetLog()->info("Census: {} wild ({} summoned), {} mission; {} over the rules ({} blocked, {} over limit, {} over group, "
+				"{} too dense), {} newly queued, queue {}", g_last.wild, g_last.summoned, g_last.mission, plan.remove.size(),
+				plan.blocked, plan.over_limit, plan.over_group, plan.too_dense, newly_queued, g_queue.size());
 	}
 
 	// One slice of the census: up to CensusActorsPerTick level actors.
@@ -1155,6 +1167,11 @@ namespace
 				}
 				out << " (" << members << ")\n";
 			}
+			for (const DensityRule& rule : g_rules->density)
+				out << "  density " << rule.name << ": max " << rule.max << " per " << static_cast<int>(rule.size / kFoundation)
+					<< " foundations\n";
+			if (!g_rules->density.empty())
+				out << "  density removals planned by the last census: " << g_last.too_dense << "\n";
 		}
 		for (size_t f = 0; f < g_settings.report_families.size() && f < g_last.family_wild.size(); ++f)
 		{

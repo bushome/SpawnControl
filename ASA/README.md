@@ -41,8 +41,8 @@ Which creatures are left alone:
 - **Protected:** classes whose path contains a `Protect.PathContains` entry (`/Missions/` by default) or that
   derive from a `Protect.Families` class.
 
-A reload of `config.json` re-resolves every class and clears the queue; limits wait for the next census to
-have real counts again, blocked classes are queued again by that census.
+A reload of `config.json` re-resolves every class and clears the queue. Live counts carry over, so limits keep
+holding; blocked classes and density rules are applied again by the next census.
 
 ## Build
 
@@ -147,13 +147,14 @@ which one was picked and why.
 | `Block` | Classes whose wild creatures are removed as soon as they appear. |
 | `Limit` | Class -> maximum wild count on this map. `0` means no limit. |
 | `GroupLimit` | Name -> `{ "Max": n, "Classes": [...] }`. One maximum shared by all the classes listed. When over, creatures are taken from whichever class has the most, so both shrink together. |
+| `Density` | Key -> `{ "Max": n, "AreaInFoundations": a }`, optionally with `"Classes": [...]`. Clump cap: no cube `a` foundations across may hold more than `n` of the class (the key), of the listed classes together, or of every wild creature (key `"*"`). Checked each census on two grids, the second shifted by half a cube, so a clump on a cube edge is still caught. Over-full spots lose their creatures farthest from players first; removals still wait for players to move off as usual. Area is capped at 200 foundations. |
 
 Class keys are either a short class name (`Otter_Character_BP_C`), which matches every class of that name
 from any mod, or a full path exactly as `ListDinos` prints it
 (`/Game/PrimalEarth/Dinos/Otter/Otter_Character_BP.Otter_Character_BP_C`), which matches one class. Matching
 is exact, never by parent class, so `Zombie_Character_BP_Skinny_C` does not catch
 `Zombie_Character_BP_Skinny_Outpost_C`. For `Limit`, a full-path entry wins over a short-name entry for the
-same class. A class can have a `Limit` and be in groups; every rule it is in must hold.
+same class. A class can have a `Limit` and be in groups; every rule it is in must hold. Density rules run after all the others, on what they leave.
 
 ## Commands
 
@@ -161,7 +162,7 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 
 | Command | What it does |
 |---|---|
-| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class and every group with its count now and each member's count (the last census minus what it queued for removal, plus spawns since), the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
+| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class and every group with its count now and each member's count, the density rules (the last census minus what it queued for removal, plus spawns since), the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
 | `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. Live counts carry over, so limits keep holding without waiting for a census: classes that already had a rule keep their count, newly ruled classes start from the last census. |
 | `SpawnControl.Links <text>` | For wild creatures whose class path contains the text: what they are linked to (owner, instigator, wild following parent, followers they lead, zone manager link), as counts. One pass over all actors; for diagnosing creatures that spawn others. Also written to the log. |
 
