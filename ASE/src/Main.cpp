@@ -56,6 +56,7 @@ namespace
 	const char* const kTimerId = "SpawnControl.Timer";
 	const char* const kHookEntry = "ANPCZoneManager.IsValidNPCEntry";
 	const char* const kHookBeginPlay = "APrimalDinoCharacter.BeginPlay";
+	const char* const kHookZoneSpawn = "ANPCZoneManager.SpawnNPCs";
 	const char* const kLevelActorsField = "ULevelBase.Actors";
 	const wchar_t* const kMapSwitch = L"-SpawnControlMap=";
 	const wchar_t* const kServerKeySwitch = L"-ServerKey=";  // shared with the other plugins
@@ -188,6 +189,12 @@ namespace
 	size_t g_hook_calls = 0;
 
 	bool g_hook_installed = false;
+	bool g_zone_hook_installed = false;
+	int g_zone_spawn_depth = 0;                         // > 0 while a zone is spawning its creatures
+	uint64_t g_zone_spawn_calls = 0;
+	uint64_t g_summoned_seen = 0;                       // creatures marked summoned since load
+	std::unordered_set<uint64_t> g_summoned;            // wild creatures that appeared outside a zone spawn
+	std::unordered_set<uint64_t> g_summoned_building;   // the same, seen by the census in progress
 	bool g_entry_hook_installed = false;
 
 	// Zone spawn entries weighed and refused, and the time spent deciding.
@@ -319,16 +326,24 @@ namespace
 		Wild,
 	};
 
-	// Summoned by another creature: its owner or instigator is a different creature. A Gloon's Revenant
-	// escorts are; zone spawns are not. Removing an escort only makes its summoner replace it.
+	// Summoned by another creature: it appeared after startup without a zone spawning it. A Gloon's
+	// Revenant escorts do; their summoner keeps no link the API can read, so where they came from is
+	// the test. Removing one only makes its summoner replace it.
 	bool IsSummoned(APrimalDinoCharacter* dino)
 	{
-		UClass* dino_class = APrimalDinoCharacter::GetPrivateStaticClass();
-		AActor* owner = dino->OwnerField();
-		if (owner != nullptr && owner != dino && owner->IsA(dino_class))
-			return true;
-		AActor* instigator = dino->InstigatorField();
-		return instigator != nullptr && instigator != dino && instigator->IsA(dino_class);
+		return !g_summoned.empty() && g_summoned.count(WeakKey(GetWeakReference(dino))) > 0;
+	}
+
+	void NoteAppearance(APrimalDinoCharacter* dino)
+	{
+		if (!g_zone_hook_installed || !g_settings.ignore_summoned || !g_have_report || g_zone_spawn_depth > 0)
+			return; // before the first census, creatures are still loading from the save
+		if (dino == nullptr || dino->TargetingTeamField() >= kFirstPlayerTeam || dino->OwnerMissionField() != nullptr)
+			return;
+		const uint64_t key = WeakKey(GetWeakReference(dino));
+		if (g_summoned.insert(key).second)
+			++g_summoned_seen;
+		g_summoned_building.insert(key);
 	}
 
 	Kind Classify(APrimalDinoCharacter* dino)
@@ -701,6 +716,7 @@ namespace
 			++g_building.family_wild[rule.report_family];
 		if (kind == Kind::Summoned)
 		{
+			g_summoned_building.insert(WeakKey(GetWeakReference(dino)));
 			++g_building.summoned;
 			++g_building.summoned_by_class[class_index];
 			return;
@@ -737,6 +753,8 @@ namespace
 	{
 		g_first_seen.swap(g_first_seen_building);
 		g_first_seen_building.clear();
+		g_summoned.swap(g_summoned_building); // drops creatures that are gone
+		g_summoned_building.clear();
 		if (g_settings.refresh_hours <= 0)
 		{
 			g_refresh_items.clear();
@@ -962,6 +980,17 @@ namespace
 		return refuse ? false : valid;
 	}
 
+	DECLARE_HOOK(ANPCZoneManager_SpawnNPCs, bool, ANPCZoneManager*);
+
+	bool Hook_ANPCZoneManager_SpawnNPCs(ANPCZoneManager* _this)
+	{
+		++g_zone_spawn_depth;
+		++g_zone_spawn_calls;
+		const bool result = ANPCZoneManager_SpawnNPCs_original(_this);
+		--g_zone_spawn_depth;
+		return result;
+	}
+
 	DECLARE_HOOK(APrimalDinoCharacter_BeginPlay, void, APrimalDinoCharacter*);
 
 	void Hook_APrimalDinoCharacter_BeginPlay(APrimalDinoCharacter* _this)
@@ -971,6 +1000,7 @@ namespace
 		const auto start = Clock::now();
 		try
 		{
+			NoteAppearance(_this);
 			OnCreatureAppeared(_this);
 		}
 		catch (const std::exception& exception)
@@ -1071,6 +1101,10 @@ namespace
 			<< (g_entry_checks > 0 ? g_entry_total_us / g_entry_checks : 0.0) << " us, max " << g_entry_max_us << " us"
 			<< (g_entry_hook_installed ? "" : " (hook not installed)")
 			<< (g_settings.refuse_full_entries ? "" : " (RefuseFullEntries off)") << "\n";
+		out << "Summoned (appeared outside a zone spawn): " << g_summoned.size() << " alive, " << g_summoned_seen
+			<< " since load; zone spawn calls " << g_zone_spawn_calls
+			<< (g_zone_hook_installed ? "" : " (hook not installed)")
+			<< (g_settings.ignore_summoned ? "" : " (IgnoreSummoned off)") << "\n";
 
 		if (!filter.empty())
 		{
@@ -1258,6 +1292,12 @@ extern "C" __declspec(dllexport) void Plugin_Init()
 	if (!g_hook_installed)
 		Log::GetLog()->error("Could not hook {}; only the census will enforce limits", kHookBeginPlay);
 
+	g_zone_hook_installed = ArkApi::GetHooks().SetHook(kHookZoneSpawn,
+		reinterpret_cast<LPVOID>(&Hook_ANPCZoneManager_SpawnNPCs), &ANPCZoneManager_SpawnNPCs_original);
+	if (!g_zone_hook_installed)
+		Log::GetLog()->error("Could not hook {}; summoned creatures cannot be told apart and are limited like the rest",
+			kHookZoneSpawn);
+
 	ArkApi::GetCommands().AddConsoleCommand(kCmdReload, &ConsoleReload);
 	ArkApi::GetCommands().AddConsoleCommand(kCmdList, &ConsoleList);
 	ArkApi::GetCommands().AddRconCommand(kCmdReload, &RconReload);
@@ -1283,5 +1323,10 @@ extern "C" __declspec(dllexport) void Plugin_Unload()
 	{
 		ArkApi::GetHooks().DisableHook(kHookBeginPlay, reinterpret_cast<LPVOID>(&Hook_APrimalDinoCharacter_BeginPlay));
 		g_hook_installed = false;
+	}
+	if (g_zone_hook_installed)
+	{
+		ArkApi::GetHooks().DisableHook(kHookZoneSpawn, reinterpret_cast<LPVOID>(&Hook_ANPCZoneManager_SpawnNPCs));
+		g_zone_hook_installed = false;
 	}
 }

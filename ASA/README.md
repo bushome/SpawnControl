@@ -105,7 +105,7 @@ Comments are allowed. `configs\config.commented.json` has the same values with e
 | `CensusIntervalSeconds` | 60 | Seconds between census passes. |
 | `NearPlayerDistance` | 10000 | Unreal units (300 = one foundation). Queued creatures closer than this to a player wait. |
 | `RefuseFullEntries` | true | Let zones skip spawn entries whose creatures are all blocked or at their limit. |
-| `IgnoreSummoned` | true | Leave creatures summoned by another creature (escorts whose owner or instigator is a creature) out of every rule. They are counted in the census and shown in `List`. Limit the summoner instead. |
+| `IgnoreSummoned` | true | Leave creatures summoned by another creature (a Gloon's Revenant escorts) out of every rule: a wild creature that appears after the first census without a spawn zone spawning it. They are counted in the census and shown in `List`. Limit the summoner instead. |
 | `LogRemovals` | true | Once a minute, log how many creatures were removed and how many zone spawn entries were refused, by class. Once a class is at its limit, this shows how hard the zones still push for it. |
 
 ### Protect

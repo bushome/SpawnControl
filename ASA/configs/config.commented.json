@@ -17,7 +17,8 @@
     // spawn other species instead of creatures that would only be removed again.
     "RefuseFullEntries": true,
     // Creatures summoned by another creature (a Gloon's Revenant escorts) are counted but never limited or
-    // removed: the summoner would only replace them. Limit the summoner instead.
+    // removed: the summoner would only replace them. Limit the summoner instead. A creature counts as
+    // summoned when it appears after the first census without a spawn zone spawning it.
     "IgnoreSummoned": true
   },
 
