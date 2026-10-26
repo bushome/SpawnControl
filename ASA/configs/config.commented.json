@@ -129,6 +129,13 @@
         "Fraction": 0.5,
         "Exclude": [ "Thrall_Character_BP_Base_C" ]
       },
+      // Report only: creatures under the map or inside rock, found with the game's own under-mesh test.
+      // Awake creatures are tested at ChecksPerSecond; List and the log show what was found. Nothing is
+      // removed. Leave the key out to turn it off.
+      "UnderMesh": {
+        "ChecksPerSecond": 20,
+        "Exclude": []
+      },
       "BlockAreas": [
         { "Name": "Misplaced spawner", "Location": [ 0, 0, -60000 ], "RadiusInFoundations": 30 }
       ]

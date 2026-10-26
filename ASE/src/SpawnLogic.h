@@ -171,6 +171,15 @@ namespace SpawnControl
 		std::vector<std::string> exclude;
 	};
 
+	// Creatures under the map or inside its geometry, found with the game's own under-mesh test. Report only:
+	// nothing is removed or moved yet.
+	struct UnderMeshRule
+	{
+		bool enabled = false;
+		int checks_per_second = 20;        // game under-mesh tests per second, each on one awake creature
+		std::vector<std::string> exclude;
+	};
+
 	struct DensitySkip
 	{
 		bool caves = true;                 // creatures the game spawned in a cave or boss area
@@ -187,6 +196,7 @@ namespace SpawnControl
 		DensitySkip density_skip;
 		std::vector<BlockArea> block_areas;
 		OverlapRule overlap;
+		UnderMeshRule under_mesh;
 	};
 
 	struct ReportFamily
@@ -451,6 +461,22 @@ namespace SpawnControl
 				}
 			}
 
+			if (section.contains("UnderMesh"))
+			{
+				const nlohmann::json& under = section["UnderMesh"];
+				if (!under.is_object())
+					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond and Exclude; ignored");
+				else
+				{
+					rules.under_mesh.enabled = true;
+					const int checks = ReadInt(under, "ChecksPerSecond", rules.under_mesh.checks_per_second, 1, warnings);
+					rules.under_mesh.checks_per_second = (std::min)(checks, 200);
+					if (checks > 200)
+						warnings.push_back(where + "UnderMesh.ChecksPerSecond above 200; using 200");
+					rules.under_mesh.exclude = ReadStrings(under, "Exclude", {}, warnings, where + "UnderMesh.");
+				}
+			}
+
 			if (section.contains("BlockAreas"))
 				rules.block_areas = ReadAreas(section["BlockAreas"], where + "BlockAreas", warnings);
 			return rules;
@@ -469,7 +495,8 @@ namespace SpawnControl
 			return false;
 		}
 
-		constexpr std::initializer_list<const char*> kMapKeys = { "Block", "Limit", "GroupLimit", "Density", "DensitySkip", "BlockAreas", "Overlap" };
+		constexpr std::initializer_list<const char*> kMapKeys = { "Block", "Limit", "GroupLimit", "Density", "DensitySkip", "BlockAreas", "Overlap",
+			"UnderMesh" };
 
 		// Keys nobody reads are ignored by ARK-style configs without a word; here each one is a warning, with
 		// a hint when the key exists one level up or down.
@@ -544,6 +571,8 @@ namespace SpawnControl
 					WarnUnknownAreas(map["BlockAreas"], where + "BlockAreas", warnings);
 				if (map.contains("Overlap"))
 					WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
+				if (map.contains("UnderMesh"))
+					WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Exclude" }, where + "UnderMesh.", warnings);
 			}
 		}
 	}
@@ -653,6 +682,7 @@ namespace SpawnControl
 		std::vector<int> groups;   // indices into MapRules::groups
 		std::vector<int> density;  // indices into MapRules::density
 		bool overlap = false;      // checked for spawning inside other creatures
+		bool under_mesh = false;   // checked with the game's under-mesh test
 		int report_family = -1;    // index into Settings::report_families
 	};
 
@@ -736,12 +766,13 @@ namespace SpawnControl
 		}
 
 		rule.overlap = rules->overlap.enabled && !ExcludedBy(rules->overlap.exclude, info);
+		rule.under_mesh = rules->under_mesh.enabled && !ExcludedBy(rules->under_mesh.exclude, info);
 		return rule;
 	}
 
 	inline bool HasAnyRule(const ClassRule& rule)
 	{
-		return rule.blocked || rule.limit != kNoLimit || !rule.groups.empty() || !rule.density.empty() || rule.overlap;
+		return rule.blocked || rule.limit != kNoLimit || !rule.groups.empty() || !rule.density.empty() || rule.overlap || rule.under_mesh;
 	}
 
 	// ------------------------------------------------------------------------------------------

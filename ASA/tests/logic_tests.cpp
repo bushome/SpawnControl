@@ -517,6 +517,35 @@ static void TestConfigChecks()
 	CHECK(misplaced.maps.size() == 2);
 }
 
+static void TestUnderMesh()
+{
+	const Settings parsed = Parse(R"({ "Maps": {
+		"A": { "UnderMesh": { "ChecksPerSecond": 50, "Exclude": [ "/ZombieDino/" ] } },
+		"B": { "UnderMesh": { "ChecksPerSecond": 900 } },
+		"C": { "UnderMesh": {} },
+		"D": {} } })");
+	CHECK(parsed.maps[0].under_mesh.enabled && parsed.maps[0].under_mesh.checks_per_second == 50 && parsed.maps[0].under_mesh.exclude.size() == 1);
+	CHECK(parsed.maps[1].under_mesh.checks_per_second == 200);
+	CHECK(parsed.maps[2].under_mesh.enabled && parsed.maps[2].under_mesh.checks_per_second == 20);
+	CHECK(!parsed.maps[3].under_mesh.enabled);
+	CHECK(parsed.warnings.size() == 1);
+
+	Settings settings;
+	ClassInfo raptor;
+	raptor.short_name = "Raptor_C";
+	raptor.path = "/Game/Raptor.Raptor_C";
+	raptor.chain = { "Raptor_C", "PrimalDinoCharacter" };
+	ClassInfo corrupted;
+	corrupted.short_name = "Raptor_Corrupted_C";
+	corrupted.path = "/Game/ZombieDino/Raptor_Corrupted.Raptor_Corrupted_C";
+	CHECK(ResolveClass(settings, &parsed.maps[0], raptor).under_mesh && HasAnyRule(ResolveClass(settings, &parsed.maps[0], raptor)));
+	CHECK(!ResolveClass(settings, &parsed.maps[0], corrupted).under_mesh);
+	CHECK(!ResolveClass(settings, &parsed.maps[3], raptor).under_mesh);
+
+	const Settings typo = Parse(R"({ "Maps": { "A": { "UnderMesh": { "ChecksPerTick": 5 } } } })");
+	CHECK(typo.warnings.size() == 1 && typo.warnings[0].find("UnderMesh.ChecksPerTick") != std::string::npos);
+}
+
 static void TestOverOnSpawn()
 {
 	std::vector<GroupRule> groups(1);
@@ -649,6 +678,7 @@ int main(int argc, char** argv)
 	TestBlockAreas();
 	TestOverlap();
 	TestConfigChecks();
+	TestUnderMesh();
 	TestOverOnSpawn();
 	TestIsFull();
 	TestRefresh();

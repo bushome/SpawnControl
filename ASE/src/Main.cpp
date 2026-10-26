@@ -215,6 +215,33 @@ namespace
 	};
 	std::unordered_map<ANPCZoneManager*, ZoneStats> g_zone_stats;  // only while block areas are configured
 	size_t g_zones_stopped = 0;
+
+	// Under-mesh report: each census queues the creatures to test; the timer tests the awake ones at
+	// UnderMesh.ChecksPerSecond with the game's own under-mesh test. Nothing is removed.
+	struct MeshCandidate
+	{
+		TWeakObjectPtr<APrimalDinoCharacter> creature;
+		int class_index = 0;
+	};
+	struct MeshSuspect
+	{
+		int class_index = 0;
+		double x = 0, y = 0, z = 0;
+		bool overlapping = false;   // the game says it overlaps geometry, not only that it is below it
+		std::string hit;            // the kind of component the test hit
+	};
+	constexpr size_t kMeshRecent = 10;
+	constexpr size_t kMeshPopsPerSecond = 5000;     // stasised creatures are skipped cheaply, but not without end
+	constexpr size_t kMeshLogsPerMinute = 20;
+	std::deque<MeshCandidate> g_mesh_queue;
+	std::deque<MeshSuspect> g_mesh_recent;
+	std::unordered_set<uint64_t> g_mesh_reported;
+	uint64_t g_mesh_checks = 0;
+	uint64_t g_mesh_suspects = 0;
+	uint64_t g_mesh_in_exclusion_zone = 0;
+	double g_mesh_total_us = 0;
+	double g_mesh_max_us = 0;
+	size_t g_mesh_logged_this_minute = 0;
 	uint64_t g_stopped_zone_refusals = 0;
 	uint64_t g_block_area_queued = 0;                   // creatures queued for being inside a block area
 	uint64_t g_summoned_seen = 0;                       // creatures marked summoned since load
@@ -477,6 +504,7 @@ namespace
 		g_queue.clear();
 		g_queued.clear();
 		g_zone_stats.clear(); // block areas may have changed; stopped zones are learned again
+		g_mesh_queue.clear(); // classes may have left the under-mesh rule; the next census queues again
 		g_zones_stopped = 0;
 
 		std::vector<bool> had_rule(g_classes.size(), false);
@@ -894,6 +922,17 @@ namespace
 		g_building.in_block_area = plan.in_block_area;
 		g_building.overlapping = plan.overlapping;
 		g_building.overlap_samples = plan.overlap_samples;
+
+		g_mesh_queue.clear();
+		if (g_rules != nullptr && g_rules->under_mesh.enabled)
+		{
+			for (const CensusItem& item : g_census_items)
+			{
+				const ClassRule& rule = g_classes[item.class_index].rule;
+				if (rule.under_mesh && !rule.is_protected && !item.in_cave && !item.in_block_area)
+					g_mesh_queue.push_back({ item.creature, item.class_index });
+			}
+		}
 		g_building.hotspots = plan.hotspots;
 		g_building.wild_by_class.resize(g_classes.size(), 0);
 		g_building.mission_by_class.resize(g_classes.size(), 0);
@@ -1141,6 +1180,8 @@ namespace
 	// Timer
 	// ------------------------------------------------------------------------------------------
 
+	void MeshTick();
+
 	void OnTimer()
 	{
 		if (!g_settings_loaded || World() == nullptr)
@@ -1164,8 +1205,11 @@ namespace
 		if (++g_seconds_since_log >= kLogIntervalSeconds)
 		{
 			g_seconds_since_log = 0;
+			g_mesh_logged_this_minute = 0;
 			LogRemovals();
 		}
+
+		MeshTick();
 
 		if (!g_queue.empty())
 		{
@@ -1174,6 +1218,60 @@ namespace
 			DrainQueue();
 			if (g_removed_total != removed_before)
 				g_drain_timing.Add(std::chrono::duration<double, std::milli>(Clock::now() - start).count());
+		}
+	}
+
+	void MeshTick()
+	{
+		if (g_rules == nullptr || !g_rules->under_mesh.enabled || g_mesh_queue.empty())
+			return;
+		int budget = g_rules->under_mesh.checks_per_second;
+		size_t pops = 0;
+		while (budget > 0 && pops < kMeshPopsPerSecond && !g_mesh_queue.empty())
+		{
+			const MeshCandidate candidate = g_mesh_queue.front();
+			g_mesh_queue.pop_front();
+			++pops;
+			APrimalDinoCharacter* dino = candidate.creature.Get();
+			if (dino == nullptr || Classify(dino) != Kind::Wild || dino->bStasised()())
+				continue; // gone, tamed, or asleep in stasis: tested when a later census finds it awake
+			const uint64_t key = WeakKey(candidate.creature);
+			if (g_mesh_reported.count(key) > 0)
+				continue;
+			FVector location = ActorLocation(dino);
+
+			FVector hit_location(0, 0, 0);
+			bool overlapping = false;
+			UActorComponent* hit = nullptr;
+			const auto start = Clock::now();
+			const bool under = UVictoryCore::IsUnderMesh(dino, &hit_location, &overlapping, &hit, false, 0.0f);
+			const double us = std::chrono::duration<double, std::micro>(Clock::now() - start).count();
+			g_mesh_total_us += us;
+			g_mesh_max_us = (std::max)(g_mesh_max_us, us);
+			++g_mesh_checks;
+			--budget;
+			if (!under)
+				continue;
+
+			g_mesh_reported.insert(key);
+			++g_mesh_suspects;
+			MeshSuspect suspect;
+			suspect.class_index = candidate.class_index;
+			suspect.x = static_cast<double>(location.X);
+			suspect.y = static_cast<double>(location.Y);
+			suspect.z = static_cast<double>(location.Z);
+			suspect.overlapping = overlapping;
+			UObject* hit_object = reinterpret_cast<UObject*>(hit);
+			suspect.hit = hit_object != nullptr && hit_object->ClassField() != nullptr ? hit_object->ClassField()->NameField().ToString().ToString() : "nothing";
+			g_mesh_recent.push_front(suspect);
+			if (g_mesh_recent.size() > kMeshRecent)
+				g_mesh_recent.pop_back();
+			if (g_mesh_logged_this_minute < kMeshLogsPerMinute)
+			{
+				++g_mesh_logged_this_minute;
+				Log::GetLog()->info("Under mesh: {} at {:.0f} {:.0f} {:.0f} ({}, hit {})", g_classes[candidate.class_index].info.short_name,
+					suspect.x, suspect.y, suspect.z, overlapping ? "overlapping" : "below", suspect.hit);
+			}
 		}
 	}
 
@@ -1366,6 +1464,20 @@ namespace
 				{
 					if (stats.stopped)
 						out << "    stopped: " << ObjectName(zone) << " (" << stats.inside << " spawned into " << stats.area << ")\n";
+				}
+			}
+			if (g_rules->under_mesh.enabled)
+			{
+				out << "  under mesh (report only): " << g_mesh_checks << " tested, avg "
+					<< (g_mesh_checks > 0 ? g_mesh_total_us / g_mesh_checks : 0.0) << " us, max " << g_mesh_max_us << " us, "
+					<< g_mesh_suspects << " suspects since load";
+				out << "; " << g_mesh_queue.size() << " waiting for this census\n";
+				for (const MeshSuspect& suspect : g_mesh_recent)
+				{
+					const int c = suspect.class_index;
+					out << "    " << (c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"))
+						<< " at " << static_cast<int>(suspect.x) << " " << static_cast<int>(suspect.y) << " " << static_cast<int>(suspect.z)
+						<< " (" << (suspect.overlapping ? "overlapping" : "below") << ", hit " << suspect.hit << ")\n";
 				}
 			}
 			if (g_rules->overlap.enabled)
