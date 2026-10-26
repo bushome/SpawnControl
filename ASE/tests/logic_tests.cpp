@@ -367,6 +367,50 @@ static void TestDensity()
 	CHECK(ResolveClass(settings, &thrall_map, bary).density.size() == 1);
 }
 
+static void TestBlockAreas()
+{
+	const Settings parsed = Parse(R"({ "Maps": { "M": { "BlockAreas": [
+		{ "Name": "Spawner", "Location": [ 1000, 2000, -60000 ], "RadiusInFoundations": 10 },
+		{ "Location": [ 0, 0 ], "RadiusInFoundations": 5 },
+		{ "Location": [ 0, 0, 0, 0 ], "RadiusInFoundations": 5 },
+		{ "Name": "NoRadius", "Location": [ 0, 0 ] } ] } } })");
+	const MapRules& map = parsed.maps.front();
+	CHECK(map.block_areas.size() == 2);
+	CHECK(map.block_areas[0].has_z && map.block_areas[0].z == -60000 && map.block_areas[0].radius == 10 * kFoundation);
+	CHECK(!map.block_areas[1].has_z);
+	CHECK(parsed.warnings.size() == 2);
+
+	// A sphere leaves the surface above it alone; a column does not care about height.
+	CHECK(BlockAreaAt(map.block_areas, 1000, 2000, -60000) == 0);
+	CHECK(BlockAreaAt(map.block_areas, 1000, 2000, 10000) == -1);
+	CHECK(BlockAreaAt(map.block_areas, 100, 100, 99999) == 1);
+	CHECK(BlockAreaAt(map.block_areas, 5000, 5000, 0) == -1);
+
+	CHECK(!ZoneShouldStop(2, 0));
+	CHECK(ZoneShouldStop(3, 0));
+	CHECK(!ZoneShouldStop(10, 1));
+
+	// Planning: creatures in a block area go first, whatever their class, and are not counted.
+	std::vector<ClassRule> rules(2);
+	rules[0].limit = 1;
+	rules[1].is_protected = true;
+	std::vector<Creature> creatures;
+	for (int i = 0; i < 4; ++i)
+	{
+		Creature c; c.id = creatures.size(); c.class_index = 0; c.player_distance = i; c.in_block_area = i < 2; creatures.push_back(c);
+	}
+	Creature unruled; unruled.id = creatures.size(); unruled.class_index = 1; unruled.in_block_area = true; creatures.push_back(unruled);
+	const Plan plan = PlanRemovals(rules, {}, creatures);
+	CHECK(plan.in_block_area == 2);              // the protected one stays
+	CHECK(plan.remove.size() == 3);              // 2 in the area, then 1 over the limit of 1
+	CHECK(plan.class_counts[0] == 1);
+	CHECK(plan.remove[0] == 0 && plan.remove[1] == 1);
+
+	// DensitySkip areas still parse through the same reader.
+	const Settings skip = Parse(R"({ "Maps": { "M": { "DensitySkip": { "Areas": [ { "Location": [ 5, 6, 7 ], "RadiusInFoundations": 2 } ] } } } })");
+	CHECK(skip.maps.front().density_skip.areas.size() == 1 && skip.maps.front().density_skip.areas[0].y == 6);
+}
+
 static void TestOverOnSpawn()
 {
 	std::vector<GroupRule> groups(1);
@@ -496,6 +540,7 @@ int main(int argc, char** argv)
 	TestResolve();
 	TestPlan();
 	TestDensity();
+	TestBlockAreas();
 	TestOverOnSpawn();
 	TestIsFull();
 	TestRefresh();

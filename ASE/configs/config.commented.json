@@ -116,7 +116,15 @@
         "Areas": [
           { "Name": "City", "Location": [ 0, 0, 0 ], "RadiusInFoundations": 100 }
         ]
-      }
+      },
+      // Where no wild creature belongs, e.g. around a misplaced spawner or under the map. Every wild creature
+      // inside is removed whatever its class (tames, mission and protected creatures excepted). A zone that
+      // puts 3 creatures inside and none anywhere else has its spawn entries refused from then on, so it
+      // stops spawning instead of refilling. With [x, y, z] the area is a sphere, so the ground above an
+      // underground spot is untouched; with [x, y] it is a column at any height.
+      "BlockAreas": [
+        { "Name": "Misplaced spawner", "Location": [ 0, 0, -60000 ], "RadiusInFoundations": 30 }
+      ]
     }
   }
 }

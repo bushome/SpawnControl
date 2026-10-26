@@ -130,6 +130,37 @@ namespace SpawnControl
 		double radius = 0;                 // Unreal units
 	};
 
+	// Where no wild creature belongs, e.g. under a misplaced spawner: everything wild inside is removed and
+	// zones that only spawn inside are stopped. A sphere when the location has a height, else a column.
+	struct BlockArea
+	{
+		std::string name;
+		double x = 0, y = 0, z = 0;
+		bool has_z = false;
+		double radius = 0;                 // Unreal units
+	};
+
+	constexpr int kZoneStopAfter = 3;      // spawns inside a block area, none outside, before a zone is stopped
+
+	inline int BlockAreaAt(const std::vector<BlockArea>& areas, double x, double y, double z)
+	{
+		for (size_t a = 0; a < areas.size(); ++a)
+		{
+			const BlockArea& area = areas[a];
+			const double dx = x - area.x, dy = y - area.y, dz = area.has_z ? z - area.z : 0.0;
+			if (dx * dx + dy * dy + dz * dz <= area.radius * area.radius)
+				return static_cast<int>(a);
+		}
+		return -1;
+	}
+
+	// A zone is stopped once it has put several creatures inside block areas and none anywhere else, so a
+	// zone that also spawns in normal places keeps working.
+	inline bool ZoneShouldStop(int spawned_inside, int spawned_outside)
+	{
+		return spawned_inside >= kZoneStopAfter && spawned_outside == 0;
+	}
+
 	struct DensitySkip
 	{
 		bool caves = true;                 // creatures the game spawned in a cave or boss area
@@ -144,6 +175,7 @@ namespace SpawnControl
 		std::vector<GroupRule> groups;
 		std::vector<DensityRule> density;
 		DensitySkip density_skip;
+		std::vector<BlockArea> block_areas;
 	};
 
 	struct ReportFamily
@@ -219,6 +251,41 @@ namespace SpawnControl
 					out.push_back(item.get<std::string>());
 				else
 					warnings.push_back(where + key + " has an entry that is not a class name; skipped");
+			}
+			return out;
+		}
+
+		// A list of { "Name", "Location": [x, y] or [x, y, z], "RadiusInFoundations" }.
+		inline std::vector<BlockArea> ReadAreas(const nlohmann::json& areas, const std::string& where,
+			std::vector<std::string>& warnings)
+		{
+			std::vector<BlockArea> out;
+			if (!areas.is_array())
+			{
+				warnings.push_back(where + " must be a list; ignored");
+				return out;
+			}
+			for (size_t a = 0; a < areas.size(); ++a)
+			{
+				const nlohmann::json& entry = areas[a];
+				const std::string area_where = where + "[" + std::to_string(a) + "] ";
+				const nlohmann::json* location = entry.is_object() && entry.contains("Location") ? &entry["Location"] : nullptr;
+				const int radius = ReadInt(entry, "RadiusInFoundations", -1, 1, warnings);
+				if (location == nullptr || !location->is_array() || location->size() < 2 || location->size() > 3 ||
+					!(*location)[0].is_number() || !(*location)[1].is_number() ||
+					(location->size() == 3 && !(*location)[2].is_number()) || radius < 1)
+				{
+					warnings.push_back(area_where + "needs Location [x, y] or [x, y, z] and RadiusInFoundations of 1 or more; skipped");
+					continue;
+				}
+				BlockArea area;
+				area.name = entry.contains("Name") && entry["Name"].is_string() ? entry["Name"].get<std::string>() : "";
+				area.x = (*location)[0].get<double>();
+				area.y = (*location)[1].get<double>();
+				area.has_z = location->size() == 3;
+				area.z = area.has_z ? (*location)[2].get<double>() : 0.0;
+				area.radius = radius * kFoundation;
+				out.push_back(std::move(area));
 			}
 			return out;
 		}
@@ -346,34 +413,14 @@ namespace SpawnControl
 					}
 					if (skip.contains("Areas"))
 					{
-						const nlohmann::json& areas = skip["Areas"];
-						if (!areas.is_array())
-							warnings.push_back(skip_where + "Areas must be a list; ignored");
-						else
-						{
-							for (size_t a = 0; a < areas.size(); ++a)
-							{
-								const nlohmann::json& entry = areas[a];
-								const std::string area_where = skip_where + "Areas[" + std::to_string(a) + "] ";
-								const nlohmann::json* location = entry.is_object() && entry.contains("Location") ? &entry["Location"] : nullptr;
-								const int radius = ReadInt(entry, "RadiusInFoundations", -1, 1, warnings);
-								if (location == nullptr || !location->is_array() || location->size() < 2 ||
-									!(*location)[0].is_number() || !(*location)[1].is_number() || radius < 1)
-								{
-									warnings.push_back(area_where + "needs Location [x, y] or [x, y, z] and RadiusInFoundations of 1 or more; skipped");
-									continue;
-								}
-								DensityArea area;
-								area.name = entry.contains("Name") && entry["Name"].is_string() ? entry["Name"].get<std::string>() : "";
-								area.x = (*location)[0].get<double>();
-								area.y = (*location)[1].get<double>();
-								area.radius = radius * kFoundation;
-								rules.density_skip.areas.push_back(std::move(area));
-							}
-						}
+						for (const BlockArea& area : ReadAreas(skip["Areas"], skip_where + "Areas", warnings))
+							rules.density_skip.areas.push_back({ area.name, area.x, area.y, area.radius });
 					}
 				}
 			}
+
+			if (section.contains("BlockAreas"))
+				rules.block_areas = ReadAreas(section["BlockAreas"], where + "BlockAreas", warnings);
 			return rules;
 		}
 	}
@@ -572,6 +619,7 @@ namespace SpawnControl
 		double player_distance = 0;  // to the nearest player; larger = removed sooner
 		double x = 0, y = 0, z = 0;  // where it is, for density rules
 		bool in_cave = false;        // the game spawned it in a cave or boss area
+		bool in_block_area = false;  // inside a block area: removed whatever its class
 	};
 
 	inline bool SkipsDensity(const DensitySkip& skip, const Creature& creature)
@@ -604,6 +652,7 @@ namespace SpawnControl
 		size_t over_limit = 0;
 		size_t over_group = 0;
 		size_t too_dense = 0;
+		size_t in_block_area = 0;
 		std::vector<DensityHotspot> hotspots;     // one per density rule
 	};
 
@@ -625,14 +674,24 @@ namespace SpawnControl
 		auto valid_group = [&](int g) { return g >= 0 && static_cast<size_t>(g) < groups.size(); };
 
 		// Per class: what is still unpicked, farthest from players first (ties keep census order).
+		// Creatures inside a block area go first, whatever their class, and are not counted.
+		std::vector<bool> removed(creatures.size(), false);
 		std::vector<std::vector<const Creature*>> remaining(rules.size());
-		for (const Creature& creature : creatures)
+		for (size_t i = 0; i < creatures.size(); ++i)
 		{
+			const Creature& creature = creatures[i];
 			if (creature.class_index < 0 || static_cast<size_t>(creature.class_index) >= rules.size())
 				continue;
 			const ClassRule& rule = rules[creature.class_index];
 			if (rule.is_protected)
 				continue;
+			if (creature.in_block_area)
+			{
+				removed[i] = true;
+				plan.remove.push_back(creature.id);
+				++plan.in_block_area;
+				continue;
+			}
 			++plan.class_counts[creature.class_index];
 			for (int g : rule.groups)
 			{
@@ -650,7 +709,6 @@ namespace SpawnControl
 			std::reverse(list.begin(), list.end()); // farthest at the back, so taking is pop_back
 		}
 
-		std::vector<bool> removed(creatures.size(), false);
 		auto uncount = [&](size_t c)
 			{
 				--plan.class_counts[c];

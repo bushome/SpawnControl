@@ -76,6 +76,7 @@ namespace
 		int class_index = 0;
 		int deferrals = 0;
 		bool refresh = false;  // a rolling refresh pick, not a rule removal
+		bool area = false;     // inside a block area: removed whatever its class's rules
 	};
 
 	struct CensusItem
@@ -85,6 +86,7 @@ namespace
 		double player_distance = 0;
 		double x = 0, y = 0, z = 0;
 		bool in_cave = false;
+		bool in_block_area = false;
 	};
 
 	struct Report
@@ -96,6 +98,7 @@ namespace
 		size_t mission = 0;
 		size_t summoned = 0;                  // wild, summoned by another creature, outside the rules
 		size_t too_dense = 0;                 // planned by density rules
+		size_t in_block_area = 0;             // planned because they are inside a block area
 		std::vector<DensityHotspot> hotspots; // fullest cube per density rule
 		std::vector<int> summoned_by_class;   // the summoned part of wild_by_class
 		std::vector<int> wild_by_class;       // every class, protected included
@@ -192,6 +195,19 @@ namespace
 	bool g_zone_hook_installed = false;
 	int g_zone_spawn_depth = 0;                         // > 0 while a zone is spawning its creatures
 	uint64_t g_zone_spawn_calls = 0;
+	ANPCZoneManager* g_current_zone = nullptr;          // the zone whose SpawnNPCs is running
+
+	struct ZoneStats
+	{
+		int inside = 0;       // spawned into a block area
+		int outside = 0;
+		bool stopped = false;
+		std::string area;     // the block area it spawned into
+	};
+	std::unordered_map<ANPCZoneManager*, ZoneStats> g_zone_stats;  // only while block areas are configured
+	size_t g_zones_stopped = 0;
+	uint64_t g_stopped_zone_refusals = 0;
+	uint64_t g_block_area_queued = 0;                   // creatures queued for being inside a block area
 	uint64_t g_summoned_seen = 0;                       // creatures marked summoned since load
 	std::unordered_set<uint64_t> g_summoned;            // wild creatures that appeared outside a zone spawn
 	std::unordered_set<uint64_t> g_summoned_building;   // the same, seen by the census in progress
@@ -320,6 +336,14 @@ namespace
 	// Summoned by another creature: it appeared after startup without a zone spawning it. A Gloon's
 	// Revenant escorts do; their summoner keeps no link the API can read, so where they came from is
 	// the test. Removing one only makes its summoner replace it.
+	int InBlockArea(const FVector& location)
+	{
+		if (g_rules == nullptr || g_rules->block_areas.empty())
+			return -1;
+		return BlockAreaAt(g_rules->block_areas, static_cast<double>(location.X), static_cast<double>(location.Y),
+			static_cast<double>(location.Z));
+	}
+
 	bool IsSummoned(APrimalDinoCharacter* dino)
 	{
 		return !g_summoned.empty() && g_summoned.count(WeakKey(GetWeakReference(dino))) > 0;
@@ -434,6 +458,8 @@ namespace
 		}
 		g_queue.clear();
 		g_queued.clear();
+		g_zone_stats.clear(); // block areas may have changed; stopped zones are learned again
+		g_zones_stopped = 0;
 
 		std::vector<bool> had_rule(g_classes.size(), false);
 		for (size_t c = 0; c < g_classes.size(); ++c)
@@ -514,12 +540,13 @@ namespace
 	// ------------------------------------------------------------------------------------------
 
 	// Returns false when the creature is already queued.
-	bool Enqueue(APrimalDinoCharacter* dino, int class_index, bool refresh = false)
+	bool Enqueue(APrimalDinoCharacter* dino, int class_index, bool refresh = false, bool area = false)
 	{
 		QueueItem item;
 		item.creature = GetWeakReference(dino);
 		item.class_index = class_index;
 		item.refresh = refresh;
+		item.area = area;
 		const uint64_t key = WeakKey(item.creature);
 		if (!g_queued.insert(key).second)
 			return false;
@@ -631,8 +658,8 @@ namespace
 				--budget;
 				continue;
 			}
-			if (dino == nullptr || !valid_class || Classify(dino) != Kind::Wild ||
-				g_classes[item.class_index].rule.is_protected || !HasAnyRule(g_classes[item.class_index].rule))
+			if (dino == nullptr || !valid_class || Classify(dino) != Kind::Wild || g_classes[item.class_index].rule.is_protected ||
+				(!item.area && !HasAnyRule(g_classes[item.class_index].rule)))
 			{
 				g_queued.erase(WeakKey(item.creature));
 				++g_removed_skipped;
@@ -728,10 +755,11 @@ namespace
 			}
 		}
 
-		if (!HasAnyRule(rule) || rule.is_protected)
+		const FVector location = dino->GetLocation();
+		const bool in_block_area = InBlockArea(location) >= 0;
+		if ((!HasAnyRule(rule) && !in_block_area) || rule.is_protected)
 			return;
 
-		const FVector location = dino->GetLocation();
 		CensusItem item;
 		item.creature = GetWeakReference(dino);
 		item.class_index = class_index;
@@ -740,6 +768,7 @@ namespace
 		item.y = static_cast<double>(location.Y);
 		item.z = static_cast<double>(location.Z);
 		item.in_cave = dino->bWasSpawnedInACaveOrBossArea()();
+		item.in_block_area = in_block_area;
 		g_census_items.push_back(item);
 	}
 
@@ -796,7 +825,7 @@ namespace
 		for (size_t i = 0; i < g_census_items.size(); ++i)
 		{
 			const CensusItem& item = g_census_items[i];
-			creatures.push_back({ i, item.class_index, item.player_distance, item.x, item.y, item.z, item.in_cave });
+			creatures.push_back({ i, item.class_index, item.player_distance, item.x, item.y, item.z, item.in_cave, item.in_block_area });
 		}
 
 		static const std::vector<GroupRule> no_groups;
@@ -825,8 +854,12 @@ namespace
 		for (size_t id : plan.remove)
 		{
 			APrimalDinoCharacter* dino = g_census_items[id].creature.Get();
-			if (dino != nullptr && Enqueue(dino, g_census_items[id].class_index))
+			if (dino != nullptr && Enqueue(dino, g_census_items[id].class_index, false, g_census_items[id].in_block_area))
+			{
 				++newly_queued;
+				if (g_census_items[id].in_block_area)
+					++g_block_area_queued;
+			}
 		}
 
 		g_building.finished = Clock::now();
@@ -836,6 +869,7 @@ namespace
 		g_building.over_limit = plan.over_limit;
 		g_building.over_group = plan.over_group;
 		g_building.too_dense = plan.too_dense;
+		g_building.in_block_area = plan.in_block_area;
 		g_building.hotspots = plan.hotspots;
 		g_building.wild_by_class.resize(g_classes.size(), 0);
 		g_building.mission_by_class.resize(g_classes.size(), 0);
@@ -900,6 +934,39 @@ namespace
 	// Spawn hook
 	// ------------------------------------------------------------------------------------------
 
+	std::string ObjectName(ANPCZoneManager* zone)
+	{
+		UObject* object = reinterpret_cast<UObject*>(zone);
+		return object != nullptr ? object->NameField().ToString().ToString() : std::string("?");
+	}
+
+	FVector ActorLocationOf(ANPCZoneManager* zone)
+	{
+		return zone != nullptr ? reinterpret_cast<AActor*>(zone)->GetLocation() : FVector(0, 0, 0);
+	}
+
+	// Spawns by a zone into a block area, and the zone that keeps doing only that is stopped.
+	void NoteZoneSpawn(ANPCZoneManager* zone, int area)
+	{
+		ZoneStats& stats = g_zone_stats[zone];
+		if (area >= 0)
+		{
+			++stats.inside;
+			stats.area = g_rules->block_areas[area].name;
+		}
+		else
+			++stats.outside;
+		if (!stats.stopped && ZoneShouldStop(stats.inside, stats.outside))
+		{
+			stats.stopped = true;
+			++g_zones_stopped;
+			const FVector at = ActorLocationOf(zone);
+			Log::GetLog()->warn("Zone {} spawned {} creatures only inside block area {}; its spawn entries are refused from now on "
+				"(zone at {:.0f} {:.0f} {:.0f})", ObjectName(zone), stats.inside, stats.area.empty() ? std::string("(unnamed)") : stats.area,
+				at.X, at.Y, at.Z);
+		}
+	}
+
 	void OnCreatureAppeared(APrimalDinoCharacter* dino)
 	{
 		if (!g_settings_loaded || g_rules == nullptr || !g_counts_ready)
@@ -909,7 +976,22 @@ namespace
 
 		const int class_index = ClassIndexFor(dino->ClassField());
 		const ClassRule& rule = g_classes[class_index].rule;
-		if (rule.is_protected || !HasAnyRule(rule))
+		if (rule.is_protected)
+			return;
+
+		if (!g_rules->block_areas.empty())
+		{
+			const int area = InBlockArea(dino->GetLocation());
+			if (g_zone_spawn_depth > 0 && g_current_zone != nullptr)
+				NoteZoneSpawn(g_current_zone, area);
+			if (area >= 0)
+			{
+				if (Enqueue(dino, class_index, false, true))
+					++g_block_area_queued;
+				return;
+			}
+		}
+		if (!HasAnyRule(rule))
 			return;
 
 		// Live counts always mean "after everything already queued is gone".
@@ -961,6 +1043,15 @@ namespace
 	bool Hook_ANPCZoneManager_IsValidNPCEntry(ANPCZoneManager* _this, FNPCSpawnEntry* entry)
 	{
 		const bool valid = ANPCZoneManager_IsValidNPCEntry_original(_this, entry);
+		if (valid && !g_zone_stats.empty())
+		{
+			const auto zone = g_zone_stats.find(_this);
+			if (zone != g_zone_stats.end() && zone->second.stopped)
+			{
+				++g_stopped_zone_refusals;
+				return false;
+			}
+		}
 		if (!valid || entry == nullptr || !g_settings_loaded || !g_settings.refuse_full_entries || g_rules == nullptr ||
 			!g_counts_ready)
 			return valid;
@@ -994,7 +1085,10 @@ namespace
 	{
 		++g_zone_spawn_depth;
 		++g_zone_spawn_calls;
+		ANPCZoneManager* const outer_zone = g_current_zone;
+		g_current_zone = _this;
 		const bool result = ANPCZoneManager_SpawnNPCs_original(_this);
+		g_current_zone = outer_zone;
 		--g_zone_spawn_depth;
 		return result;
 	}
@@ -1209,6 +1303,28 @@ namespace
 					out << ", " << (area.name.empty() ? std::string("area") : area.name) << " (" << static_cast<int>(area.radius / kFoundation)
 						<< " foundations)";
 				out << "\n  density removals planned by the last census: " << g_last.too_dense << "\n";
+			}
+			for (const BlockArea& area : g_rules->block_areas)
+			{
+				out << "  block area " << (area.name.empty() ? std::string("(unnamed)") : area.name) << ": "
+					<< static_cast<int>(area.radius / kFoundation) << " foundations around " << static_cast<int>(area.x) << " "
+					<< static_cast<int>(area.y);
+				if (area.has_z)
+					out << " " << static_cast<int>(area.z) << " (sphere)";
+				else
+					out << " (any height)";
+				out << "\n";
+			}
+			if (!g_rules->block_areas.empty())
+			{
+				out << "  block areas: " << g_block_area_queued << " queued since load, " << g_last.in_block_area
+					<< " inside at the last census; zones stopped " << g_zones_stopped << " (" << g_stopped_zone_refusals
+					<< " entries refused)\n";
+				for (const auto& [zone, stats] : g_zone_stats)
+				{
+					if (stats.stopped)
+						out << "    stopped: " << ObjectName(zone) << " (" << stats.inside << " spawned into " << stats.area << ")\n";
+				}
 			}
 		}
 		for (size_t f = 0; f < g_settings.report_families.size() && f < g_last.family_wild.size(); ++f)
