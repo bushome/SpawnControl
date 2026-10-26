@@ -25,6 +25,13 @@ The ARK: Survival Ascended build lives in `..\ASA`.
    has a rule) and then destroyed: no corpse, no loot, no death effects. A creature within
    `NearPlayerDistance` of a player goes to the back of the queue, up to 30 times, so removals happen out of
    sight.
+5. **Rolling refresh.** With `Refresh.TurnoverHours` set, each census also queues its share of a slow
+   turnover of the whole wild population: enough that every creature is replaced in about that many hours
+   (24 h on 20,000 creatures is about 14 a minute), oldest first. The zones respawn them with freshly rolled
+   levels, so a periodic full dino wipe is no longer needed. Ages count from server start, so right after
+   a restart every creature is equally old until `MinAgeMinutes` have passed. A pick is dropped, not
+   deferred, if by its turn it is within `PlayerDistance` of a player, took damage within
+   `RecentDamageSeconds`, is unconscious, being tamed or young; the next census picks another.
 
 Which creatures are left alone:
 
@@ -102,6 +109,19 @@ Comments are allowed. `configs\config.commented.json` has the same values with e
 | `PathContains` | `["/Missions/"]` | Classes whose path contains any of these are never touched. |
 | `Families` | `[]` | Classes deriving from any of these are never touched, e.g. `Thrall_Character_BP_Base_C`. |
 
+### Refresh
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `TurnoverHours` | 0 in code, 24 shipped | The wild population turns over in about this many hours. 0 = off. |
+| `MinAgeMinutes` | 60 | Never refresh a creature first seen less than this long ago. |
+| `PlayerDistance` | 30000 | Never refresh a creature this close to a player (300 m). |
+| `RecentDamageSeconds` | 300 | Never refresh a creature that took damage this recently. |
+| `SkipPathContains` | `["/Missions/", "Thrall", "Boss"]` | Classes whose path contains any of these are never refreshed. |
+
+Tamed, mission-owned and protected creatures are never refreshed. Refreshes are logged once a minute
+(`Refreshed in the last 60 s`) and counted in `SpawnControl.List`.
+
 ### ReportFamilies
 
 Label -> parent class. Each becomes a summary row in `SpawnControl.List` (wild without a mission, and
@@ -131,7 +151,7 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 
 | Command | What it does |
 |---|---|
-| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class with its count, every group, the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
+| `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class with its count, every group, the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules and full path. Also written to the log. |
 | `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. |
 
 ## Troubleshooting

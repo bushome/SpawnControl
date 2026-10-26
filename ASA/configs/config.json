@@ -11,6 +11,13 @@
     "PathContains": [ "/Missions/" ],
     "Families": []
   },
+  "Refresh": {
+    "TurnoverHours": 24,
+    "MinAgeMinutes": 60,
+    "PlayerDistance": 30000,
+    "RecentDamageSeconds": 300,
+    "SkipPathContains": [ "/Missions/", "Thrall", "Boss" ]
+  },
   "ReportFamilies": {
     "Thralls": "Thrall_Character_BP_Base_C"
   },

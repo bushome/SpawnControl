@@ -258,6 +258,38 @@ static void TestIsFull()
 	CHECK(!IsFull(blocked, 0, {}, groups));
 }
 
+static void TestRefresh()
+{
+	// Quota: 24,000 creatures over 24 h = 1,000 per hour = 16.67 per minute; the fraction carries over.
+	double carry = 0;
+	size_t total = 0;
+	for (int minute = 0; minute < 60; ++minute)
+		total += RefreshQuota(24000, 60, 24, carry);
+	CHECK(total == 1000 || total == 999);
+	carry = 0;
+	CHECK(RefreshQuota(24000, 60, 0, carry) == 0);
+	CHECK(RefreshQuota(0, 60, 24, carry) == 0);
+	CHECK(RefreshQuota(24000, 0, 24, carry) == 0);
+
+	// Oldest first, then farthest from players; too young or too close never picked.
+	const std::vector<RefreshCandidate> candidates = {
+		{ 0, 7200, 50000 }, { 1, 9000, 40000 }, { 2, 9000, 60000 },
+		{ 3, 600, 90000 },   // too young
+		{ 4, 99999, 1000 },  // too close to a player
+	};
+	const std::vector<size_t> picked = PlanRefresh(candidates, 2, 3600, 30000);
+	CHECK(picked.size() == 2 && picked[0] == 2 && picked[1] == 1);
+	const std::vector<size_t> all = PlanRefresh(candidates, 10, 3600, 30000);
+	CHECK(all.size() == 3);
+	CHECK(PlanRefresh(candidates, 0, 3600, 30000).empty());
+
+	Settings settings;
+	ClassInfo thrall{ "Thrall_Character_BP_Soldier_C", "/Game/LostColony/Thrall/Thrall_Character_BP_Soldier.Thrall_Character_BP_Soldier_C", {} };
+	ClassInfo rex{ "Rex_Character_BP_C", "/Game/PrimalEarth/Dinos/Rex/Rex_Character_BP.Rex_Character_BP_C", {} };
+	CHECK(SkipsRefresh(settings, thrall));
+	CHECK(!SkipsRefresh(settings, rex));
+}
+
 static void TestConfigFile(const std::string& path, bool shipped_expectations)
 {
 	std::ifstream file(path);
@@ -293,6 +325,11 @@ static void TestConfigFile(const std::string& path, bool shipped_expectations)
 	CHECK(settings.protected_paths.size() == 1 && settings.protected_paths[0] == "/Missions/");
 	CHECK(settings.protected_families.empty());
 	CHECK(settings.report_families.size() == 1 && settings.report_families[0].base_class == "Thrall_Character_BP_Base_C");
+	CHECK(settings.refresh_hours == 24);
+	CHECK(settings.refresh_min_age_minutes == 60);
+	CHECK(settings.refresh_player_distance == 30000.0);
+	CHECK(settings.refresh_recent_damage_seconds == 300);
+	CHECK(settings.refresh_skip_paths.size() == 3);
 
 	const MapRules* lost_colony = FindMapRules(settings, "LostColony_WP");
 	CHECK(lost_colony != nullptr);
@@ -314,6 +351,7 @@ int main(int argc, char** argv)
 	TestPlan();
 	TestOverOnSpawn();
 	TestIsFull();
+	TestRefresh();
 
 	if (argc > 1)
 		TestConfigFile(argv[1], argc > 2 && std::string(argv[2]) == "--shipped");

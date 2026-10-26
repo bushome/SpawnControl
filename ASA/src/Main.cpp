@@ -10,6 +10,9 @@
 //   - ANPCZoneManager::IsValidNPCEntry is hooked. When a zone weighs a spawn entry whose creatures are all
 //     blocked or at their limit, the entry is refused, so the zone spawns something else instead of a
 //     creature that would only be removed again (RefuseFullEntries).
+//   - Refresh.TurnoverHours (off by default) replaces wild creatures a few at a time, oldest first, so the
+//     zones respawn them with fresh levels instead of a full wipe. Each census queues its share; nothing
+//     near a player, recently hurt, unconscious, being tamed or young is refreshed.
 //   - Removals never happen in the hook or in bulk: a queue drains RemovalsPerTick creatures per second,
 //     each re-checked before it is destroyed (still wild, still not a mission creature, rule still set).
 //
@@ -67,6 +70,7 @@ namespace
 		TWeakObjectPtr<APrimalDinoCharacter> creature;
 		int class_index = 0;
 		int deferrals = 0;
+		bool refresh = false;  // a rolling refresh pick, not a rule removal
 	};
 
 	struct CensusItem
@@ -126,6 +130,24 @@ namespace
 	Report g_building;
 	Report g_last;
 	bool g_have_report = false;
+
+	// Rolling refresh: when each wild creature was first seen (seconds since load), carried from census to
+	// census by weak pointer key, and the creatures this census found eligible.
+	struct RefreshItem
+	{
+		TWeakObjectPtr<APrimalDinoCharacter> creature;
+		int class_index = 0;
+		uint64_t key = 0;
+		double player_distance = 0;
+	};
+	std::unordered_map<uint64_t, double> g_first_seen;
+	std::unordered_map<uint64_t, double> g_first_seen_building;
+	std::vector<RefreshItem> g_refresh_items;
+	double g_refresh_carry = 0;
+	double g_last_refresh_plan = -1;
+	size_t g_refreshed_total = 0;
+	std::unordered_map<int, size_t> g_refreshed_since_log;
+	const Clock::time_point g_loaded_at = Clock::now();
 
 	// Statistics.
 	size_t g_removed_total = 0;
@@ -223,6 +245,29 @@ namespace
 		return std::sqrt(best);
 	}
 
+	double SecondsSinceLoad()
+	{
+		return std::chrono::duration<double>(Clock::now() - g_loaded_at).count();
+	}
+
+	// May this wild creature be refreshed right now? Not while unconscious, being tamed, recently hurt or
+	// young (wild babies follow a parent).
+	bool RefreshAllowedNow(APrimalDinoCharacter* dino)
+	{
+		if (!dino->IsConscious() || dino->TamingTeamIDField() != 0)
+			return false;
+		const float baby_age = dino->BabyAgeField();
+		if (baby_age > 0.0f && baby_age < 1.0f)
+			return false;
+		if (dino->WildFollowingParentRefField() != nullptr)
+			return false;
+		UWorld* world = World();
+		if (world != nullptr && g_settings.refresh_recent_damage_seconds > 0 && dino->LastTookDamageTimeField() > 0 &&
+			world->TimeSecondsField() - dino->LastTookDamageTimeField() < g_settings.refresh_recent_damage_seconds)
+			return false;
+		return true;
+	}
+
 	// Class entry for a creature class: path, name chain and resolved rule, built once and cached.
 	int ClassIndexFor(UClass* cls)
 	{
@@ -303,6 +348,7 @@ namespace
 	void ApplyRules()
 	{
 		g_map_name = CurrentMapName();
+		const bool was_known = g_map_known;
 		g_map_known = !g_map_name.empty();
 		const std::string forced = MapSwitchValue();
 		if (!forced.empty())
@@ -315,6 +361,8 @@ namespace
 			g_rules = FindMapRules(g_settings, g_map_name);
 			g_section_source = "map " + g_map_name;
 		}
+		if (g_map_known && !was_known)
+			Log::GetLog()->info("Map {}: using section {}", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"));
 
 		for (ClassEntry& entry : g_classes)
 			entry.rule = ResolveClass(g_settings, g_rules, entry.info);
@@ -375,11 +423,12 @@ namespace
 	// ------------------------------------------------------------------------------------------
 
 	// Returns false when the creature is already queued.
-	bool Enqueue(APrimalDinoCharacter* dino, int class_index)
+	bool Enqueue(APrimalDinoCharacter* dino, int class_index, bool refresh = false)
 	{
 		QueueItem item;
 		item.creature = GetWeakReference(dino);
 		item.class_index = class_index;
+		item.refresh = refresh;
 		const uint64_t key = WeakKey(item.creature);
 		if (!g_queued.insert(key).second)
 			return false;
@@ -426,6 +475,18 @@ namespace
 				Log::GetLog()->info("Spawn entries refused in the last {} s: {}", kLogIntervalSeconds, RefusedSummary());
 			g_refused_since_log.clear();
 		}
+		if (!g_refreshed_since_log.empty())
+		{
+			if (g_settings.log_removals)
+			{
+				size_t total = 0;
+				for (const auto& [class_index, count] : g_refreshed_since_log)
+					total += count;
+				Log::GetLog()->info("Refreshed in the last {} s: {} wild creature(s) (rolling refresh, {} total)",
+					kLogIntervalSeconds, total, g_refreshed_total);
+			}
+			g_refreshed_since_log.clear();
+		}
 		if (g_removed_since_log.empty())
 			return;
 		if (g_settings.log_removals)
@@ -463,6 +524,22 @@ namespace
 
 			APrimalDinoCharacter* dino = item.creature.Get();
 			const bool valid_class = item.class_index >= 0 && static_cast<size_t>(item.class_index) < g_classes.size();
+			if (item.refresh)
+			{
+				// A refresh pick that no longer qualifies is dropped; the next census picks another.
+				g_queued.erase(WeakKey(item.creature));
+				if (dino == nullptr || !valid_class || Classify(dino) != Kind::Wild || g_classes[item.class_index].rule.is_protected ||
+					SkipsRefresh(g_settings, g_classes[item.class_index].info) || !RefreshAllowedNow(dino) ||
+					NearestPlayerDistance(dino->GetLocation(), players) < g_settings.refresh_player_distance)
+					continue;
+				dino->Destroy(false, true);
+				if (g_counts_ready && HasAnyRule(g_classes[item.class_index].rule))
+					AdjustCounts(item.class_index, -1);
+				++g_refreshed_total;
+				++g_refreshed_since_log[item.class_index];
+				--budget;
+				continue;
+			}
 			if (dino == nullptr || !valid_class || Classify(dino) != Kind::Wild ||
 				g_classes[item.class_index].rule.is_protected || !HasAnyRule(g_classes[item.class_index].rule))
 			{
@@ -499,6 +576,8 @@ namespace
 		g_census_actor = 0;
 		g_census_started = Clock::now();
 		g_census_items.clear();
+		g_refresh_items.clear();
+		g_first_seen_building.clear();
 		g_player_positions = PlayerPositions();
 		g_spawned_during_census.assign(g_classes.size(), 0);
 
@@ -535,6 +614,21 @@ namespace
 		if (rule.report_family >= 0)
 			++g_building.family_wild[rule.report_family];
 
+		if (g_settings.refresh_hours > 0 && !rule.is_protected && !SkipsRefresh(g_settings, g_classes[class_index].info))
+		{
+			RefreshItem refresh;
+			refresh.creature = GetWeakReference(dino);
+			refresh.key = WeakKey(refresh.creature);
+			const auto seen = g_first_seen.find(refresh.key);
+			g_first_seen_building[refresh.key] = seen != g_first_seen.end() ? seen->second : SecondsSinceLoad();
+			if (RefreshAllowedNow(dino))
+			{
+				refresh.class_index = class_index;
+				refresh.player_distance = NearestPlayerDistance(dino->GetLocation(), g_player_positions);
+				g_refresh_items.push_back(refresh);
+			}
+		}
+
 		if (!HasAnyRule(rule) || rule.is_protected)
 			return;
 
@@ -543,6 +637,42 @@ namespace
 		item.class_index = class_index;
 		item.player_distance = NearestPlayerDistance(dino->GetLocation(), g_player_positions);
 		g_census_items.push_back(item);
+	}
+
+	// Queues this census's share of the rolling refresh: enough that the wild population turns over in
+	// Refresh.TurnoverHours, oldest first. Ages only count from plugin load.
+	void PlanRefreshFromCensus()
+	{
+		g_first_seen.swap(g_first_seen_building);
+		g_first_seen_building.clear();
+		if (g_settings.refresh_hours <= 0)
+		{
+			g_refresh_items.clear();
+			g_last_refresh_plan = -1;
+			return;
+		}
+
+		const double now = SecondsSinceLoad();
+		const double elapsed = g_last_refresh_plan < 0 ? 0 : now - g_last_refresh_plan;
+		g_last_refresh_plan = now;
+		const size_t quota = RefreshQuota(g_first_seen.size(), elapsed, g_settings.refresh_hours, g_refresh_carry);
+
+		std::vector<RefreshCandidate> candidates;
+		candidates.reserve(g_refresh_items.size());
+		for (size_t i = 0; i < g_refresh_items.size(); ++i)
+		{
+			const auto seen = g_first_seen.find(g_refresh_items[i].key);
+			const double age = seen != g_first_seen.end() ? now - seen->second : 0;
+			candidates.push_back({ i, age, g_refresh_items[i].player_distance });
+		}
+		for (size_t i : PlanRefresh(std::move(candidates), quota, g_settings.refresh_min_age_minutes * 60.0,
+			g_settings.refresh_player_distance))
+		{
+			APrimalDinoCharacter* dino = g_refresh_items[i].creature.Get();
+			if (dino != nullptr)
+				Enqueue(dino, g_refresh_items[i].class_index, true);
+		}
+		g_refresh_items.clear();
 	}
 
 	void FinishCensus()
@@ -597,6 +727,8 @@ namespace
 		g_last = g_building;
 		g_have_report = true;
 		g_census_items.clear();
+
+		PlanRefreshFromCensus();
 
 		if (plan.remove.size() > 0)
 			Log::GetLog()->info("Census: {} wild, {} mission; {} over the rules ({} blocked, {} over limit, {} over group), "
@@ -840,6 +972,8 @@ namespace
 		out << "Per tick: census slice avg " << g_census_timing.Average() << " ms, max " << g_census_timing.max_ms
 			<< " ms; removals avg " << g_drain_timing.Average() << " ms, max " << g_drain_timing.max_ms << " ms ("
 			<< g_drain_timing.ticks << " ticks)\n";
+		if (g_settings.refresh_hours > 0)
+			out << "Rolling refresh: turnover " << g_settings.refresh_hours << " h, " << g_refreshed_total << " refreshed\n";
 		out << "Zone entries: " << g_entry_checks << " checked, " << g_entry_refused << " refused, avg "
 			<< (g_entry_checks > 0 ? g_entry_total_us / g_entry_checks : 0.0) << " us, max " << g_entry_max_us << " us"
 			<< (g_entry_hook_installed ? "" : " (hook not installed)")

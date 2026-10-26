@@ -27,6 +27,24 @@
     "Families": []
   },
 
+  // Rolling refresh: wild creatures are replaced a few at a time, oldest first, so the zones respawn them
+  // with freshly rolled levels. Replaces a periodic full dino wipe. Ages count from server start.
+  "Refresh": {
+    // The whole wild population turns over in about this many hours. 0 turns the refresh off.
+    // 24 h on ~20,000 creatures is about 14 per minute.
+    "TurnoverHours": 24,
+    // Never refresh a creature first seen less than this many minutes ago.
+    "MinAgeMinutes": 60,
+    // Never refresh a creature this close to any player (Unreal units; 30000 = 300 m), so nobody sees it go.
+    "PlayerDistance": 30000,
+    // Never refresh a creature that took damage within this many seconds (it may be in a fight).
+    "RecentDamageSeconds": 300,
+    // Classes whose path contains any of these are never refreshed: missions, Lost Colony Thralls and
+    // their mounts (PatrolRepair looks after patrols), bosses. Tamed, mission-owned, protected,
+    // unconscious, being-tamed and young creatures are never refreshed either.
+    "SkipPathContains": [ "/Missions/", "Thrall", "Boss" ]
+  },
+
   // Extra summary rows in SpawnControl.List: label -> parent class. Reporting only, no effect on removal.
   "ReportFamilies": {
     "Thralls": "Thrall_Character_BP_Base_C"

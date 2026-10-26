@@ -135,6 +135,14 @@ namespace SpawnControl
 
 		std::vector<MapRules> maps;
 		std::vector<std::string> warnings;
+
+		// Rolling refresh: wild creatures replaced a few at a time so the zones respawn them with fresh
+		// levels, instead of a full wipe. 0 hours = off.
+		int refresh_hours = 0;                   // the whole wild population turns over in about this long
+		int refresh_min_age_minutes = 60;        // never refresh a creature first seen less than this ago
+		double refresh_player_distance = 30000;  // never refresh a creature this close to a player
+		int refresh_recent_damage_seconds = 300; // never refresh a creature that took damage this recently
+		std::vector<std::string> refresh_skip_paths{ "/Missions/", "Thrall", "Boss" };
 	};
 
 	namespace detail
@@ -295,6 +303,13 @@ namespace SpawnControl
 				}
 			}
 		}
+
+		const nlohmann::json refresh = root.value("Refresh", nlohmann::json::object());
+		settings.refresh_hours = detail::ReadInt(refresh, "TurnoverHours", settings.refresh_hours, 0, warnings);
+		settings.refresh_min_age_minutes = detail::ReadInt(refresh, "MinAgeMinutes", settings.refresh_min_age_minutes, 0, warnings);
+		settings.refresh_player_distance = detail::ReadInt(refresh, "PlayerDistance", static_cast<int>(settings.refresh_player_distance), 0, warnings);
+		settings.refresh_recent_damage_seconds = detail::ReadInt(refresh, "RecentDamageSeconds", settings.refresh_recent_damage_seconds, 0, warnings);
+		settings.refresh_skip_paths = detail::ReadStrings(refresh, "SkipPathContains", settings.refresh_skip_paths, warnings, "Refresh.");
 
 		if (root.contains("Maps"))
 		{
@@ -566,5 +581,61 @@ namespace SpawnControl
 				return true;
 		}
 		return false;
+	}
+
+	// ------------------------------------------------------------------------------------------
+	// Rolling refresh
+	// ------------------------------------------------------------------------------------------
+
+	inline bool SkipsRefresh(const Settings& settings, const ClassInfo& info)
+	{
+		for (const std::string& part : settings.refresh_skip_paths)
+		{
+			if (ContainsNoCase(info.path, part))
+				return true;
+		}
+		return false;
+	}
+
+	struct RefreshCandidate
+	{
+		size_t id = 0;               // caller's index
+		double age_seconds = 0;      // since the creature was first seen
+		double player_distance = 0;  // to the nearest player
+	};
+
+	// How many creatures to refresh after `elapsed_seconds`, so `wild` creatures turn over in `hours`.
+	// The fraction left over is carried to the next call so slow rates still add up.
+	inline size_t RefreshQuota(size_t wild, double elapsed_seconds, int hours, double& carry)
+	{
+		if (hours <= 0 || wild == 0 || elapsed_seconds <= 0)
+			return 0;
+		carry += static_cast<double>(wild) * elapsed_seconds / (static_cast<double>(hours) * 3600.0);
+		const size_t whole = static_cast<size_t>(carry);
+		carry -= static_cast<double>(whole);
+		return whole;
+	}
+
+	// Picks up to `quota` candidates: old enough and far enough from players, oldest first, then the
+	// farthest from players.
+	inline std::vector<size_t> PlanRefresh(std::vector<RefreshCandidate> candidates, size_t quota,
+		double min_age_seconds, double player_distance)
+	{
+		std::vector<size_t> picked;
+		if (quota == 0)
+			return picked;
+		candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const RefreshCandidate& c)
+			{
+				return c.age_seconds < min_age_seconds || c.player_distance < player_distance;
+			}), candidates.end());
+		std::stable_sort(candidates.begin(), candidates.end(), [](const RefreshCandidate& a, const RefreshCandidate& b)
+			{
+				if (a.age_seconds != b.age_seconds)
+					return a.age_seconds > b.age_seconds;
+				return a.player_distance > b.player_distance;
+			});
+		for (size_t i = 0; i < candidates.size() && picked.size() < quota; ++i)
+			picked.push_back(candidates[i].id);
+		return picked;
 	}
 }
