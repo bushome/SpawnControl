@@ -153,6 +153,9 @@
         // one clear creature per 5 removed) is stopped, as block areas stop zones. List names each one; a reload
         // starts over. Zones that also spawn where creatures belong are never stopped.
         "StopZones": true,
+        // Also trace straight down from each suspect and report how far below the ground is (List, log).
+        // Reported only; nothing removed changes.
+        "TraceGround": false,
         "Exclude": []
       },
       "BlockAreas": [

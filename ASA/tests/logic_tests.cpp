@@ -569,6 +569,18 @@ static void TestUnderMesh()
 
 	const Settings typo = Parse(R"({ "Maps": { "A": { "UnderMesh": { "ChecksPerTick": 5 } } } })");
 	CHECK(typo.warnings.size() == 1 && typo.warnings[0].find("UnderMesh.ChecksPerTick") != std::string::npos);
+
+	// TraceGround: off unless set, a known key, and checked for type.
+	CHECK(!parsed.maps[0].under_mesh.trace_ground);
+	const Settings tracing = Parse(R"({ "Maps": { "A": { "UnderMesh": { "TraceGround": true } }, "B": { "UnderMesh": { "TraceGround": 1 } } } })");
+	CHECK(tracing.maps[0].under_mesh.trace_ground && !tracing.maps[1].under_mesh.trace_ground);
+	CHECK(tracing.warnings.size() == 1 && tracing.warnings[0].find("TraceGround must be true or false") != std::string::npos);
+
+	// Heights on suspect lines, in foundations to one decimal.
+	CHECK(MeshHeights(4 * kFoundation, GroundBelow::NotTraced, 0) == "hit 4.0 fdn above");
+	CHECK(MeshHeights(1234.0, GroundBelow::Found, 75.0) == "hit 4.1 fdn above, ground 0.3 fdn below");
+	CHECK(MeshHeights(-150.0, GroundBelow::None, 0) == "hit 0.5 fdn below, no ground within 100 fdn below");
+	CHECK(MeshHeights(0, GroundBelow::Found, 0) == "hit 0.0 fdn above, ground 0.0 fdn below");
 }
 
 static void TestRepeatSpots()

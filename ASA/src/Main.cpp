@@ -258,6 +258,9 @@ namespace
 		bool overlapping = false;   // the game says it overlaps geometry, not only that it is below it
 		bool in_stasis = false;     // asleep, far from any player, when tested
 		std::string hit;            // the kind of component the test hit
+		double hit_above = 0;       // where the test hit, relative to the creature (units; negative is below it)
+		GroundBelow ground = GroundBelow::NotTraced;
+		double ground_below = 0;    // with TraceGround: how far below the creature the first surface is (units)
 	};
 	constexpr size_t kMeshRecent = 10;
 	constexpr size_t kMeshPopsPerSecond = 5000;     // stasised creatures are skipped cheaply, but not without end
@@ -1468,6 +1471,22 @@ namespace
 			queued > 1 ? " with " + std::to_string(queued - 1) + " follower(s)" : std::string());
 	}
 
+	// The first surface straight below a creature, ignoring the creature itself, up to kGroundTraceReach.
+	// The API declares FHitResult only through its field accessors, so the trace writes into a zeroed buffer
+	// far larger than the engine's own struct.
+	GroundBelow TraceGroundBelow(APrimalDinoCharacter* dino, const FVector& location, double& distance)
+	{
+		alignas(16) unsigned char buffer[4096] = {};
+		FHitResult* hit = reinterpret_cast<FHitResult*>(buffer);
+		const FVector start = location;
+		const FVector end(location.X, location.Y, location.Z - kGroundTraceReach);
+		if (!UVictoryCore::VTraceSingleBP(World(), hit, &start, &end, ECollisionChannel::ECC_Visibility, 0, FName(), false, dino, 0.0f))
+			return GroundBelow::None;
+		const FVector impact = hit->ImpactPointField();
+		distance = static_cast<double>(location.Z) - static_cast<double>(impact.Z);
+		return GroundBelow::Found;
+	}
+
 	void MeshTick()
 	{
 		if (g_rules == nullptr || !g_rules->under_mesh.enabled || g_mesh_queue.empty())
@@ -1542,6 +1561,9 @@ namespace
 			suspect.in_stasis = in_stasis;
 			UObject* hit_object = reinterpret_cast<UObject*>(hit);
 			suspect.hit = hit_object != nullptr && hit_object->ClassField() != nullptr ? hit_object->ClassField()->NameField().ToString().ToString() : "nothing";
+			suspect.hit_above = static_cast<double>(hit_location.Z) - static_cast<double>(location.Z);
+			if (g_rules->under_mesh.trace_ground)
+				suspect.ground = TraceGroundBelow(dino, location, suspect.ground_below);
 			g_mesh_recent.push_front(suspect);
 			if (g_mesh_recent.size() > kMeshRecent)
 				g_mesh_recent.pop_back();
@@ -1549,8 +1571,9 @@ namespace
 			if (g_settings.log_removals && !g_rules->under_mesh.remove && g_mesh_logged_this_minute < kMeshLogsPerMinute)
 			{
 				++g_mesh_logged_this_minute;
-				Log::GetLog()->info("Under mesh: {} at {:.0f} {:.0f} {:.0f} ({}{}, hit {})", g_classes[candidate.class_index].info.short_name,
-					suspect.x, suspect.y, suspect.z, overlapping ? "overlapping" : "below", in_stasis ? ", in stasis" : "", suspect.hit);
+				Log::GetLog()->info("Under mesh: {} at {:.0f} {:.0f} {:.0f} ({}{}, hit {}; {})", g_classes[candidate.class_index].info.short_name,
+					suspect.x, suspect.y, suspect.z, overlapping ? "overlapping" : "below", in_stasis ? ", in stasis" : "", suspect.hit,
+					MeshHeights(suspect.hit_above, suspect.ground, suspect.ground_below));
 			}
 		}
 	}
@@ -1847,7 +1870,8 @@ namespace
 					const int c = suspect.class_index;
 					out << "    " << (c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"))
 						<< " at " << static_cast<int>(suspect.x) << " " << static_cast<int>(suspect.y) << " " << static_cast<int>(suspect.z)
-						<< " (" << (suspect.overlapping ? "overlapping" : "below") << (suspect.in_stasis ? ", in stasis" : "") << ", hit " << suspect.hit << ")\n";
+						<< " (" << (suspect.overlapping ? "overlapping" : "below") << (suspect.in_stasis ? ", in stasis" : "") << ", hit " << suspect.hit
+						<< "; " << MeshHeights(suspect.hit_above, suspect.ground, suspect.ground_below) << ")\n";
 				}
 			}
 			if (g_rules->overlap.enabled)
@@ -1996,6 +2020,12 @@ namespace
 				UObject* hit_object = reinterpret_cast<UObject*>(hit);
 				const std::string hit_name = hit_object != nullptr && hit_object->ClassField() != nullptr ?
 					hit_object->ClassField()->NameField().ToString().ToString() : "nothing";
+				double ground_below = 0;
+				const GroundBelow ground = TraceGroundBelow(dino, location, ground_below);
+				const std::string heights = under ?
+					MeshHeights(static_cast<double>(hit_location.Z) - static_cast<double>(location.Z), ground, ground_below) :
+					ground == GroundBelow::Found ? "ground " + FoundationsText(ground_below) + " fdn below" :
+					"no ground within " + std::to_string(static_cast<int>(kGroundTraceReach / kFoundation)) + " fdn below";
 				const Kind kind = Classify(dino);
 				const char* kind_name = kind == Kind::Wild ? "wild" : kind == Kind::Mission ? "mission" : kind == Kind::Summoned ? "summoned" : "tamed/dead";
 				const int class_index = ClassIndexFor(dino->ClassField());
@@ -2003,7 +2033,7 @@ namespace
 				line << g_classes[class_index].info.short_name << " " << static_cast<int>(distance / kFoundation) << " fdn, "
 					<< static_cast<int>((static_cast<double>(location.Z) - static_cast<double>(at.Z)) / kFoundation) << " fdn up/down: "
 					<< kind_name << (dino->bStasised()() ? ", in stasis" : ", awake") << " -> "
-					<< (under ? (overlapping ? "UNDER (overlapping)" : "UNDER (below)") : "clear") << ", hit " << hit_name
+					<< (under ? (overlapping ? "UNDER (overlapping)" : "UNDER (below)") : "clear") << ", hit " << hit_name << "; " << heights
 					<< (excluded ? " [map exclusion zone]" : "")
 					<< (g_mesh_reported.count(WeakKey(GetWeakReference(dino))) > 0 ? " [already reported]" : "");
 				rows.push_back({ distance, under, line.str() });

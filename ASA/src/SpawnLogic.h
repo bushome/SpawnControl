@@ -183,6 +183,7 @@ namespace SpawnControl
 		bool remove = false;
 		bool include_stasis = false;       // also test creatures in stasis, far from any player
 		bool stop_zones = true;            // with remove: stop a zone whose spawns end up under the mesh
+		bool trace_ground = false;         // trace down from each suspect and report how far below the ground is
 		std::vector<std::string> exclude;
 	};
 
@@ -214,6 +215,29 @@ namespace SpawnControl
 			return false;
 		}
 		return census > first_below_census;
+	}
+
+	// Heights reported with each under-mesh suspect: where the game's test hit relative to the creature, and,
+	// with TraceGround, how far below it the first surface is. They are reported only; nothing acts on them.
+	constexpr double kGroundTraceReach = 100 * kFoundation;
+	enum class GroundBelow { NotTraced, Found, None };
+
+	// Foundations to one decimal, without sign.
+	inline std::string FoundationsText(double units)
+	{
+		const long long tenths = std::llround(std::fabs(units) / kFoundation * 10.0);
+		return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10);
+	}
+
+	// hit_above: hit height minus creature height, in units. ground_below: creature height minus surface height.
+	inline std::string MeshHeights(double hit_above, GroundBelow ground, double ground_below)
+	{
+		std::string out = "hit " + FoundationsText(hit_above) + (hit_above < 0 ? " fdn below" : " fdn above");
+		if (ground == GroundBelow::Found)
+			out += ", ground " + FoundationsText(ground_below) + " fdn below";
+		else if (ground == GroundBelow::None)
+			out += ", no ground within " + std::to_string(static_cast<int>(kGroundTraceReach / kFoundation)) + " fdn below";
+		return out;
 	}
 
 	struct DensitySkip
@@ -514,7 +538,7 @@ namespace SpawnControl
 			{
 				const nlohmann::json& under = section["UnderMesh"];
 				if (!under.is_object())
-					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, IncludeStasis, StopZones and Exclude; ignored");
+					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, IncludeStasis, StopZones, TraceGround and Exclude; ignored");
 				else
 				{
 					rules.under_mesh.enabled = true;
@@ -525,7 +549,8 @@ namespace SpawnControl
 					rules.under_mesh.exclude = ReadStrings(under, "Exclude", {}, warnings, where + "UnderMesh.");
 					for (const auto& [key, target] : { std::pair<const char*, bool*>{ "Remove", &rules.under_mesh.remove },
 							std::pair<const char*, bool*>{ "IncludeStasis", &rules.under_mesh.include_stasis },
-							std::pair<const char*, bool*>{ "StopZones", &rules.under_mesh.stop_zones } })
+							std::pair<const char*, bool*>{ "StopZones", &rules.under_mesh.stop_zones },
+							std::pair<const char*, bool*>{ "TraceGround", &rules.under_mesh.trace_ground } })
 					{
 						if (!under.contains(key))
 							continue;
@@ -611,7 +636,7 @@ namespace SpawnControl
 			if (map.contains("Overlap"))
 				WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
 			if (map.contains("UnderMesh"))
-				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "IncludeStasis", "StopZones", "Exclude" }, where + "UnderMesh.", warnings);
+				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "IncludeStasis", "StopZones", "TraceGround", "Exclude" }, where + "UnderMesh.", warnings);
 		}
 
 		inline void WarnUnknownKeys(const nlohmann::json& root, std::vector<std::string>& warnings)
