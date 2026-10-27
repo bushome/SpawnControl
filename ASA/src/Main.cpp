@@ -52,6 +52,7 @@ namespace
 	const char* const kCmdList = "SpawnControl.List";
 	const char* const kCmdMeshHere = "SpawnControl.MeshHere";
 	const char* const kCmdLinks = "SpawnControl.Links";
+	const char* const kCmdRules = "SpawnControl.Rules";
 	const char* const kTimerId = "SpawnControl.Timer";
 	const char* const kHookEntry = "ANPCZoneManager.IsValidNPCEntry(FNPCSpawnEntry&)";
 	const char* const kHookBeginPlay = "APrimalDinoCharacter.BeginPlay()";
@@ -232,7 +233,7 @@ namespace
 	};
 	constexpr size_t kMeshRecent = 10;
 	constexpr size_t kMeshPopsPerSecond = 5000;     // stasised creatures are skipped cheaply, but not without end
-	constexpr size_t kMeshLogsPerMinute = 20;
+	constexpr size_t kMeshLogsPerMinute = 20;          // report mode: suspect lines; removing: removal lines
 	std::deque<MeshCandidate> g_mesh_queue;
 	std::deque<MeshSuspect> g_mesh_recent;
 	std::unordered_set<uint64_t> g_mesh_reported;
@@ -243,6 +244,7 @@ namespace
 	double g_mesh_total_us = 0;
 	double g_mesh_max_us = 0;
 	size_t g_mesh_logged_this_minute = 0;
+	size_t g_mesh_unlogged_this_minute = 0;            // removals past the per-minute line cap, summed in one line
 	uint32_t g_census_number = 0;                       // finished censuses since load
 	std::unordered_map<uint64_t, uint32_t> g_mesh_first_below; // creature -> census it was first found below in
 	uint64_t g_mesh_removal_queued = 0;                 // creatures (and their followers) queued for removal
@@ -487,6 +489,11 @@ namespace
 			g_rules = FindMapRules(g_settings, g_map_name);
 			g_section_source = "map " + g_map_name;
 		}
+		if (g_rules == nullptr && g_settings.has_default)
+		{
+			g_rules = &g_settings.default_rules;
+			g_section_source += ", which has no section of its own";
+		}
 		if (g_map_known && !was_known)
 			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);
@@ -538,17 +545,19 @@ namespace
 		}
 	}
 
+	// The plugin's config.json, or the shared file or folder its SharedConfig points to. Comments are
+	// allowed, and a comma before a closing ] or } is dropped with a warning.
 	Settings LoadSettings()
 	{
-		const std::string path = AsaApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/" PROJECT_NAME "/config.json";
+		return LoadConfigFiles(SpawnControl::detail::PathFromUtf8(AsaApi::Tools::GetCurrentDir() + "/ArkApi/Plugins/" PROJECT_NAME));
+	}
 
-		std::ifstream file(path, std::ios::binary);
-		if (!file.is_open())
-			throw std::runtime_error("cannot open " + path);
-		std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-		// Comments are allowed, and a comma before a closing ] or } is dropped with a warning.
-		return ParseConfigText(std::move(text));
+	std::string SourcesText()
+	{
+		std::string text;
+		for (const std::string& source : g_settings.sources)
+			text += (text.empty() ? "" : ", ") + source;
+		return text.empty() ? std::string("?") : text;
 	}
 
 	// Loads config.json. On failure the previous settings stay in force.
@@ -562,8 +571,9 @@ namespace
 			g_settings = std::move(settings);
 			g_settings_loaded = true;
 			ApplyRules();
-			Log::GetLog()->info("Config loaded: {} map section(s); using {} for {}",
-				g_settings.maps.size(), g_rules != nullptr ? g_rules->name : std::string("no section"), g_section_source);
+			Log::GetLog()->info("Config loaded from {}: {} map section(s){}; using {} for {}", SourcesText(),
+				g_settings.maps.size(), g_settings.has_default ? " and Default" : "",
+				g_rules != nullptr ? g_rules->name : std::string("no section"), g_section_source);
 			return true;
 		}
 		catch (const std::exception& exception)
@@ -625,6 +635,13 @@ namespace
 
 	void LogRemovals()
 	{
+		if (g_mesh_unlogged_this_minute > 0)
+		{
+			if (g_settings.log_removals)
+				Log::GetLog()->info("Under mesh: {} more removed in the last {} s without a line each; {} shows where they cluster",
+					g_mesh_unlogged_this_minute, kLogIntervalSeconds, kCmdList);
+			g_mesh_unlogged_this_minute = 0;
+		}
 		if (!g_refused_since_log.empty())
 		{
 			if (g_settings.log_removals)
@@ -1276,6 +1293,14 @@ namespace
 		g_mesh_removal_points.push_back({ static_cast<double>(location.X), static_cast<double>(location.Y), static_cast<double>(location.Z), class_index });
 		if (g_mesh_removal_points.size() > kRemovalPointsKept)
 			g_mesh_removal_points.pop_front();
+		if (!g_settings.log_removals)
+			return;
+		if (g_mesh_logged_this_minute >= kMeshLogsPerMinute)
+		{
+			++g_mesh_unlogged_this_minute;
+			return;
+		}
+		++g_mesh_logged_this_minute;
 		Log::GetLog()->info("Under mesh: removing {} at {:.0f} {:.0f} {:.0f} (below on two censuses){}", g_classes[class_index].info.short_name,
 			static_cast<double>(location.X), static_cast<double>(location.Y), static_cast<double>(location.Z),
 			queued > 1 ? " with " + std::to_string(queued - 1) + " follower(s)" : std::string());
@@ -1353,7 +1378,8 @@ namespace
 			g_mesh_recent.push_front(suspect);
 			if (g_mesh_recent.size() > kMeshRecent)
 				g_mesh_recent.pop_back();
-			if (g_mesh_logged_this_minute < kMeshLogsPerMinute)
+			// While removing, the removal line says the same thing a census later.
+			if (g_settings.log_removals && !g_rules->under_mesh.remove && g_mesh_logged_this_minute < kMeshLogsPerMinute)
 			{
 				++g_mesh_logged_this_minute;
 				Log::GetLog()->info("Under mesh: {} at {:.0f} {:.0f} {:.0f} ({}{}, hit {})", g_classes[candidate.class_index].info.short_name,
@@ -1647,6 +1673,31 @@ namespace
 		return out.str();
 	}
 
+	// Rules: what this server is actually running with, each map value marked as its own or from Default.
+	std::string RulesText()
+	{
+		std::ostringstream out;
+		out << "SpawnControl rules: section " << (g_rules != nullptr ? g_rules->name : std::string("none")) << " for "
+			<< g_section_source << "\n";
+		out << "Read from: " << SourcesText() << "\n";
+		out << "General: RemovalsPerTick " << g_settings.removals_per_tick << ", CensusIntervalSeconds " << g_settings.census_interval_seconds
+			<< ", CensusActorsPerTick " << g_settings.census_actors_per_tick << ", NearPlayerDistance " << g_settings.near_player_distance
+			<< ", LogRemovals " << (g_settings.log_removals ? "true" : "false") << ", RefuseFullEntries "
+			<< (g_settings.refuse_full_entries ? "true" : "false") << ", IgnoreSummoned " << (g_settings.ignore_summoned ? "true" : "false") << "\n";
+		if (g_rules == nullptr)
+		{
+			out << "No section for this map and no Default section, so nothing is ruled here\n";
+			return out.str();
+		}
+		if (!g_settings.has_default)
+			out << "No Default section; every value below is this section's own\n";
+		for (const std::string& line : DescribeRules(*g_rules))
+			out << "  " << line << "\n";
+		if (!g_settings.warnings.empty())
+			out << g_settings.warnings.size() << " config warning(s) at the last load; they are in the log\n";
+		return out.str();
+	}
+
 	std::string ReloadCommandText()
 	{
 		std::string error;
@@ -1929,6 +1980,23 @@ namespace
 		RconReply(connection, packet, ListText(CommandArgument(&packet->Body)));
 	}
 
+	void ConsoleRules(APlayerController* controller, FString*, bool)
+	{
+		if (AShooterPlayerController* admin = AdminFrom(controller))
+		{
+			const std::string text = RulesText();
+			Log::GetLog()->info("Rules:\n{}", text);
+			SendAdmin(admin, text);
+		}
+	}
+
+	void RconRules(RCONClientConnection* connection, RCONPacket* packet, UWorld*)
+	{
+		const std::string text = RulesText();
+		Log::GetLog()->info("Rules:\n{}", text);
+		RconReply(connection, packet, text);
+	}
+
 	void RconLinks(RCONClientConnection* connection, RCONPacket* packet, UWorld*)
 	{
 		const std::string text = LinksText(CommandArgument(&packet->Body));
@@ -1969,9 +2037,11 @@ extern "C" __declspec(dllexport) void Plugin_Init()
 	AsaApi::GetCommands().AddConsoleCommand(kCmdList, &ConsoleList);
 	AsaApi::GetCommands().AddConsoleCommand(kCmdMeshHere, &ConsoleMeshHere);
 	AsaApi::GetCommands().AddConsoleCommand(kCmdLinks, &ConsoleLinks);
+	AsaApi::GetCommands().AddConsoleCommand(kCmdRules, &ConsoleRules);
 	AsaApi::GetCommands().AddRconCommand(kCmdReload, &RconReload);
 	AsaApi::GetCommands().AddRconCommand(kCmdList, &RconList);
 	AsaApi::GetCommands().AddRconCommand(kCmdLinks, &RconLinks);
+	AsaApi::GetCommands().AddRconCommand(kCmdRules, &RconRules);
 	AsaApi::GetCommands().AddOnTimerCallback(kTimerId, &SafeTimer);
 }
 
@@ -1983,9 +2053,11 @@ extern "C" __declspec(dllexport) void Plugin_Unload()
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdList);
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdMeshHere);
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdLinks);
+	AsaApi::GetCommands().RemoveConsoleCommand(kCmdRules);
 	AsaApi::GetCommands().RemoveRconCommand(kCmdReload);
 	AsaApi::GetCommands().RemoveRconCommand(kCmdList);
 	AsaApi::GetCommands().RemoveRconCommand(kCmdLinks);
+	AsaApi::GetCommands().RemoveRconCommand(kCmdRules);
 
 	if (g_entry_hook_installed)
 	{

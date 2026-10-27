@@ -1,5 +1,14 @@
 // SpawnControl config. Same values as config.json, with comments. Comments are allowed in config.json too.
 // Reload after editing with SpawnControl.Reload (admin console or RCON).
+//
+// To share one config between servers, this file can instead hold only
+//   { "SharedConfig": "D:\\servers\\shared\\SpawnControl" }
+// pointing at a shared file (this layout) or a folder (config.json for the settings below, Default.json, and
+// one <section>.json per map with just that map's rules). See the README.
+//
+// A top-level "Default" section, next to "Maps", holds rules every map starts from; each map section is laid
+// over it (objects merge, lists and values replace, null deletes a default entry). SpawnControl.Rules shows
+// what a server ends up with and where each value came from.
 {
   "General": {
     // Creatures removed per second at most. Removals queue up and drain at this rate, so a large cull
@@ -11,7 +20,8 @@
     "CensusIntervalSeconds": 60,
     // Creatures closer than this to any player (Unreal units, 300 = one foundation) are removed last.
     "NearPlayerDistance": 10000,
-    // Once a minute, log how many creatures were removed and of which classes, largest first.
+    // Once a minute, log how many creatures were removed and of which classes, largest first. Also gates the
+    // under-mesh lines (up to 20 a minute, the rest counted in one line). List shows the same either way.
     "LogRemovals": true,
     // Zones choosing what to spawn skip entries whose creatures are all blocked or at their limit, so they
     // spawn other species instead of creatures that would only be removed again.

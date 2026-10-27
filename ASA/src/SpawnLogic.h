@@ -10,7 +10,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -217,6 +220,11 @@ namespace SpawnControl
 		std::vector<BlockArea> block_areas;
 		OverlapRule overlap;
 		UnderMeshRule under_mesh;
+
+		// The JSON this section was read from: the Default section, and the map's own entries laid
+		// over it. Kept for the Rules command, which says where each value came from.
+		nlohmann::json defaults;
+		nlohmann::json own;
 	};
 
 	struct ReportFamily
@@ -241,6 +249,13 @@ namespace SpawnControl
 
 		std::vector<MapRules> maps;
 		std::vector<std::string> warnings;
+
+		// Default: rules every map section starts from; also used by a map that has no section.
+		bool has_default = false;
+		MapRules default_rules;
+
+		// Files the settings were read from, for the load line and the Rules command.
+		std::vector<std::string> sources;
 
 		// Rolling refresh: wild creatures replaced a few at a time so the zones respawn them with fresh
 		// levels, instead of a full wipe. 0 hours = off.
@@ -331,14 +346,15 @@ namespace SpawnControl
 			return out;
 		}
 
-		inline MapRules ReadMap(const std::string& name, const nlohmann::json& section, std::vector<std::string>& warnings)
+		inline MapRules ReadMap(const std::string& name, const nlohmann::json& section, std::vector<std::string>& warnings,
+			const std::string& where_prefix = {})
 		{
 			MapRules rules;
 			rules.name = name;
-			const std::string where = "Maps." + name + ".";
+			const std::string where = where_prefix.empty() ? "Maps." + name + "." : where_prefix;
 			if (!section.is_object())
 			{
-				warnings.push_back("Maps." + name + " must be an object; ignored");
+				warnings.push_back(where.substr(0, where.size() - 1) + " must be an object; ignored");
 				return rules;
 			}
 
@@ -554,9 +570,41 @@ namespace SpawnControl
 				WarnUnknown(areas[a], { "Name", "Location", "RadiusInFoundations" }, where + "[" + std::to_string(a) + "].", warnings);
 		}
 
+		// Unknown keys inside one map section (or Default); where ends with a dot.
+		inline void WarnUnknownMap(const nlohmann::json& map, const std::string& where, std::vector<std::string>& warnings)
+		{
+			WarnUnknown(map, kMapKeys, where, warnings);
+			if (!map.is_object())
+				return;
+			if (map.contains("GroupLimit") && map["GroupLimit"].is_object())
+			{
+				for (auto g = map["GroupLimit"].begin(); g != map["GroupLimit"].end(); ++g)
+					WarnUnknown(g.value(), { "Max", "Classes" }, where + "GroupLimit." + g.key() + ".", warnings);
+			}
+			if (map.contains("Density") && map["Density"].is_object())
+			{
+				for (auto d = map["Density"].begin(); d != map["Density"].end(); ++d)
+					WarnUnknown(d.value(), { "Max", "AreaInFoundations", "Classes", "Exclude" }, where + "Density." + d.key() + ".", warnings);
+			}
+			if (map.contains("DensitySkip"))
+			{
+				WarnUnknown(map["DensitySkip"], { "Caves", "Areas" }, where + "DensitySkip.", warnings);
+				if (map["DensitySkip"].is_object() && map["DensitySkip"].contains("Areas"))
+					WarnUnknownAreas(map["DensitySkip"]["Areas"], where + "DensitySkip.Areas", warnings);
+			}
+			if (map.contains("BlockAreas"))
+				WarnUnknownAreas(map["BlockAreas"], where + "BlockAreas", warnings);
+			if (map.contains("Overlap"))
+				WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
+			if (map.contains("UnderMesh"))
+				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "IncludeStasis", "Exclude" }, where + "UnderMesh.", warnings);
+		}
+
 		inline void WarnUnknownKeys(const nlohmann::json& root, std::vector<std::string>& warnings)
 		{
-			WarnUnknown(root, { "General", "Protect", "Refresh", "ReportFamilies", "Maps" }, "", warnings);
+			WarnUnknown(root, { "General", "Protect", "Refresh", "ReportFamilies", "Default", "Maps", "SharedConfig" }, "", warnings);
+			if (root.contains("Default"))
+				WarnUnknownMap(root["Default"], "Default.", warnings);
 			if (root.contains("General"))
 				WarnUnknown(root["General"], { "RemovalsPerTick", "CensusActorsPerTick", "CensusIntervalSeconds", "NearPlayerDistance",
 					"LogRemovals", "RefuseFullEntries", "IgnoreSummoned" }, "General.", warnings);
@@ -577,32 +625,10 @@ namespace SpawnControl
 						it.key() + ", so it is not applied to any map");
 					continue;
 				}
-				const nlohmann::json& map = it.value();
-				WarnUnknown(map, kMapKeys, where, warnings);
-				if (!map.is_object())
-					continue;
-				if (map.contains("GroupLimit") && map["GroupLimit"].is_object())
-				{
-					for (auto g = map["GroupLimit"].begin(); g != map["GroupLimit"].end(); ++g)
-						WarnUnknown(g.value(), { "Max", "Classes" }, where + "GroupLimit." + g.key() + ".", warnings);
-				}
-				if (map.contains("Density") && map["Density"].is_object())
-				{
-					for (auto d = map["Density"].begin(); d != map["Density"].end(); ++d)
-						WarnUnknown(d.value(), { "Max", "AreaInFoundations", "Classes", "Exclude" }, where + "Density." + d.key() + ".", warnings);
-				}
-				if (map.contains("DensitySkip"))
-				{
-					WarnUnknown(map["DensitySkip"], { "Caves", "Areas" }, where + "DensitySkip.", warnings);
-					if (map["DensitySkip"].is_object() && map["DensitySkip"].contains("Areas"))
-						WarnUnknownAreas(map["DensitySkip"]["Areas"], where + "DensitySkip.Areas", warnings);
-				}
-				if (map.contains("BlockAreas"))
-					WarnUnknownAreas(map["BlockAreas"], where + "BlockAreas", warnings);
-				if (map.contains("Overlap"))
-					WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
-				if (map.contains("UnderMesh"))
-					WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "IncludeStasis", "Exclude" }, where + "UnderMesh.", warnings);
+				if (EqualsNoCase(it.key(), "Default"))
+					warnings.push_back("Maps.Default is read as a map named Default; rules every map starts from go in a top-level "
+						"Default section, next to Maps");
+				WarnUnknownMap(it.value(), where, warnings);
 			}
 		}
 	}
@@ -662,6 +688,23 @@ namespace SpawnControl
 		settings.refresh_recent_damage_seconds = detail::ReadInt(refresh, "RecentDamageSeconds", settings.refresh_recent_damage_seconds, 0, warnings);
 		settings.refresh_skip_paths = detail::ReadStrings(refresh, "SkipPathContains", settings.refresh_skip_paths, warnings, "Refresh.");
 
+		// Default is read once on its own, so its problems are reported once, as Default.<key>.
+		nlohmann::json defaults = nlohmann::json::object();
+		std::vector<std::string> default_warnings;
+		if (root.contains("Default"))
+		{
+			if (!root["Default"].is_object())
+				warnings.push_back("Default must be an object of rules, like a map section; ignored");
+			else
+			{
+				defaults = root["Default"];
+				settings.has_default = true;
+				settings.default_rules = detail::ReadMap("Default", defaults, default_warnings, "Default.");
+				settings.default_rules.defaults = defaults;
+				warnings.insert(warnings.end(), default_warnings.begin(), default_warnings.end());
+			}
+		}
+
 		if (root.contains("Maps"))
 		{
 			const nlohmann::json& maps = root["Maps"];
@@ -670,7 +713,32 @@ namespace SpawnControl
 			else
 			{
 				for (auto it = maps.begin(); it != maps.end(); ++it)
-					settings.maps.push_back(detail::ReadMap(it.key(), it.value(), warnings));
+				{
+					// The map's entries laid over Default (JSON merge patch): objects merge key by key, a list
+					// or a value replaces the default one, and null deletes a default entry.
+					nlohmann::json merged = defaults;
+					if (it.value().is_object())
+						merged.merge_patch(it.value());
+					else
+						merged = it.value();
+					std::vector<std::string> map_warnings;
+					MapRules rules = detail::ReadMap(it.key(), merged, map_warnings);
+					rules.defaults = defaults;
+					rules.own = it.value();
+					// A problem inherited from Default was already reported under Default, unless the map sets
+					// that rule itself.
+					const std::string prefix = "Maps." + it.key() + ".";
+					for (const std::string& warning : map_warnings)
+					{
+						const std::string rest = warning.rfind(prefix, 0) == 0 ? warning.substr(prefix.size()) : std::string();
+						const std::string rule = rest.substr(0, rest.find_first_of(". ["));
+						const bool inherited = !rest.empty() && !(it.value().is_object() && it.value().contains(rule)) &&
+							std::find(default_warnings.begin(), default_warnings.end(), "Default." + rest) != default_warnings.end();
+						if (!inherited)
+							warnings.push_back(warning);
+					}
+					settings.maps.push_back(std::move(rules));
+				}
 			}
 		}
 		return settings;
@@ -1387,8 +1455,9 @@ namespace SpawnControl
 		return lines;
 	}
 
-	// The whole config.json text to settings: trailing commas tolerated (each one a warning), comments allowed.
-	inline Settings ParseConfigText(std::string text)
+	// One JSON file's text: comments allowed, a comma before a closing ] or } dropped with a warning that names
+	// the file and line. Throws when the text is not valid JSON.
+	inline nlohmann::json ParseJsonText(std::string text, const std::string& file, std::vector<std::string>& warnings)
 	{
 		const std::vector<int> commas = StripTrailingCommas(text);
 		nlohmann::json root;
@@ -1398,14 +1467,232 @@ namespace SpawnControl
 		}
 		catch (const nlohmann::json::exception& error)
 		{
-			throw std::runtime_error(std::string("config.json is not valid JSON: ") + error.what());
+			throw std::runtime_error(file + " is not valid JSON: " + error.what());
 		}
-		Settings settings = ParseSettings(root);
-		std::vector<std::string> comma_warnings;
 		for (int line : commas)
-			comma_warnings.push_back("line " + std::to_string(line) + ": comma before a closing ] or } ignored; remove it to keep the file valid JSON");
+			warnings.push_back((file == "config.json" ? std::string() : file + " ") + "line " + std::to_string(line) +
+				": comma before a closing ] or } ignored; remove it to keep the file valid JSON");
+		return root;
+	}
+
+	// The whole config.json text to settings: trailing commas tolerated (each one a warning), comments allowed.
+	inline Settings ParseConfigText(std::string text)
+	{
+		std::vector<std::string> comma_warnings;
+		const nlohmann::json root = ParseJsonText(std::move(text), "config.json", comma_warnings);
+		Settings settings = ParseSettings(root);
 		settings.warnings.insert(settings.warnings.begin(), comma_warnings.begin(), comma_warnings.end());
 		return settings;
+	}
+
+	// ------------------------------------------------------------------------------------------
+	// Loading from disk: the plugin's own config.json, or the shared file or folder it points to
+	// ------------------------------------------------------------------------------------------
+
+	namespace detail
+	{
+		inline std::filesystem::path PathFromUtf8(const std::string& text)
+		{
+			return std::filesystem::path(std::u8string(text.begin(), text.end()));
+		}
+
+		inline std::string Utf8FromPath(const std::filesystem::path& path)
+		{
+			const std::u8string text = path.u8string();
+			return std::string(text.begin(), text.end());
+		}
+
+		inline std::string ReadWholeFile(const std::filesystem::path& path)
+		{
+			std::ifstream file(path, std::ios::binary);
+			if (!file.is_open())
+				throw std::runtime_error("cannot open " + Utf8FromPath(path));
+			return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		}
+	}
+
+	// Reads <plugin_folder>/config.json. When it holds "SharedConfig", the settings come from there instead:
+	//   a file   - a whole config in the usual layout, shared by every server that points at it;
+	//   a folder - config.json for General, Protect, Refresh and ReportFamilies, Default.json for the
+	//              Default section, and one <section>.json per map holding just that map's rules.
+	// A relative SharedConfig is taken from the plugin folder. Anything that cannot be read or parsed
+	// throws, so a reload keeps the rules already in force.
+	inline Settings LoadConfigFiles(const std::filesystem::path& plugin_folder)
+	{
+		namespace fs = std::filesystem;
+		std::vector<std::string> warnings;
+		std::vector<std::string> sources;
+
+		const fs::path local_path = plugin_folder / "config.json";
+		nlohmann::json root = ParseJsonText(detail::ReadWholeFile(local_path), "config.json", warnings);
+		sources.push_back(detail::Utf8FromPath(local_path));
+
+		if (root.is_object() && root.contains("SharedConfig"))
+		{
+			if (!root["SharedConfig"].is_string() || root["SharedConfig"].get<std::string>().empty())
+				throw std::runtime_error("config.json: SharedConfig must be the path of a file or folder");
+			fs::path shared = detail::PathFromUtf8(root["SharedConfig"].get<std::string>());
+			if (shared.is_relative())
+				shared = plugin_folder / shared;
+			shared = shared.lexically_normal();
+			for (auto it = root.begin(); it != root.end(); ++it)
+			{
+				if (it.key() != "SharedConfig")
+					warnings.push_back("config.json: " + it.key() + " ignored; with SharedConfig every setting comes from " +
+						detail::Utf8FromPath(shared));
+			}
+			sources.clear();
+
+			std::error_code error;
+			if (fs::is_directory(shared, error))
+			{
+				// config.json first, then the other .json files by name, so loading is the same every time.
+				const fs::path base_path = shared / "config.json";
+				if (fs::is_regular_file(base_path, error))
+				{
+					root = ParseJsonText(detail::ReadWholeFile(base_path), "config.json", warnings);
+					sources.push_back(detail::Utf8FromPath(base_path));
+					if (!root.is_object())
+						throw std::runtime_error(detail::Utf8FromPath(base_path) + " must be a JSON object");
+				}
+				else
+					root = nlohmann::json::object();
+				root.erase("SharedConfig");
+
+				std::vector<fs::path> files;
+				std::error_code list_error;
+				for (fs::directory_iterator it(shared, list_error), end; !list_error && it != end; it.increment(list_error))
+				{
+					const fs::path& path = it->path();
+					std::error_code type_error;
+					if (it->is_regular_file(type_error) && EqualsNoCase(detail::Utf8FromPath(path.extension()), ".json") &&
+						!EqualsNoCase(detail::Utf8FromPath(path.filename()), "config.json"))
+						files.push_back(path);
+				}
+				if (list_error)
+					throw std::runtime_error("cannot list " + detail::Utf8FromPath(shared) + ": " + list_error.message());
+				std::sort(files.begin(), files.end());
+
+				for (const fs::path& path : files)
+				{
+					const std::string file = detail::Utf8FromPath(path.filename());
+					const std::string section = detail::Utf8FromPath(path.stem());
+					nlohmann::json body = ParseJsonText(detail::ReadWholeFile(path), file, warnings);
+					sources.push_back(detail::Utf8FromPath(path));
+					if (EqualsNoCase(section, "Default"))
+					{
+						if (root.contains("Default"))
+							warnings.push_back(file + " replaces the Default section in config.json");
+						root["Default"] = std::move(body);
+						continue;
+					}
+					if (!root.contains("Maps") || !root["Maps"].is_object())
+						root["Maps"] = nlohmann::json::object();
+					for (auto it = root["Maps"].begin(); it != root["Maps"].end(); ++it)
+					{
+						if (EqualsNoCase(it.key(), section))
+						{
+							warnings.push_back(file + " replaces the Maps." + it.key() + " section in config.json");
+							root["Maps"].erase(it);
+							break;
+						}
+					}
+					root["Maps"][section] = std::move(body);
+				}
+			}
+			else if (fs::is_regular_file(shared, error))
+			{
+				const std::string file = detail::Utf8FromPath(shared.filename());
+				root = ParseJsonText(detail::ReadWholeFile(shared), file, warnings);
+				sources.push_back(detail::Utf8FromPath(shared));
+				if (root.is_object() && root.contains("SharedConfig"))
+				{
+					warnings.push_back(file + ": SharedConfig ignored; only the plugin's own config.json can point elsewhere");
+					root.erase("SharedConfig");
+				}
+			}
+			else
+				throw std::runtime_error("SharedConfig " + detail::Utf8FromPath(shared) + " is not a file or folder that can be read");
+		}
+
+		Settings settings = ParseSettings(root);
+		settings.warnings.insert(settings.warnings.begin(), warnings.begin(), warnings.end());
+		settings.sources = std::move(sources);
+		return settings;
+	}
+
+	// ------------------------------------------------------------------------------------------
+	// Rules command: every value a map section ends up with, and where it came from
+	// ------------------------------------------------------------------------------------------
+
+	namespace detail
+	{
+		inline std::string ShortDump(const nlohmann::json& value)
+		{
+			std::string text = value.dump();
+			if (text.size() > 240)
+				text = text.substr(0, 237) + "...";
+			return text;
+		}
+
+		inline void DescribeValue(const nlohmann::json& value, const nlohmann::json* own, const nlohmann::json* defaults,
+			const std::string& path, std::vector<std::string>& lines)
+		{
+			const bool from_map = own != nullptr;
+			if (value.is_object() && !value.empty())
+			{
+				for (auto it = value.begin(); it != value.end(); ++it)
+				{
+					const nlohmann::json* own_child = own != nullptr && own->is_object() && own->contains(it.key()) ? &(*own)[it.key()] : nullptr;
+					const nlohmann::json* default_child =
+						defaults != nullptr && defaults->is_object() && defaults->contains(it.key()) ? &(*defaults)[it.key()] : nullptr;
+					DescribeValue(it.value(), own_child, default_child, path.empty() ? it.key() : path + "." + it.key(), lines);
+				}
+				// Default entries this map deleted with null.
+				if (own != nullptr && own->is_object() && defaults != nullptr && defaults->is_object())
+				{
+					for (auto it = own->begin(); it != own->end(); ++it)
+					{
+						if (it.value().is_null() && defaults->contains(it.key()))
+							lines.push_back((path.empty() ? it.key() : path + "." + it.key()) + " removed  (map; default " +
+								ShortDump((*defaults)[it.key()]) + ")");
+					}
+				}
+				return;
+			}
+			std::string origin;
+			if (!from_map)
+				origin = "default";
+			else if (defaults != nullptr && *defaults != value)
+				origin = "map; default " + ShortDump(*defaults);
+			else
+				origin = "map";
+			if (value.is_array() && !value.empty() && value[0].is_object())
+			{
+				for (size_t i = 0; i < value.size(); ++i)
+					lines.push_back(path + "[" + std::to_string(i) + "] = " + ShortDump(value[i]) + "  (" + (from_map ? "map" : "default") + ")");
+				return;
+			}
+			lines.push_back(path + " = " + ShortDump(value) + "  (" + origin + ")");
+		}
+	}
+
+	// One line per value: "Limit.Dodo_Character_BP_C = 300  (map; default 250)". A section used only
+	// because the map has none of its own shows every value as default.
+	inline std::vector<std::string> DescribeRules(const MapRules& rules)
+	{
+		nlohmann::json merged = rules.defaults.is_object() ? rules.defaults : nlohmann::json::object();
+		if (rules.own.is_object())
+			merged.merge_patch(rules.own);
+		std::vector<std::string> lines;
+		if (merged.empty())
+		{
+			lines.push_back("(no rules)");
+			return lines;
+		}
+		const nlohmann::json* own = rules.own.is_object() ? &rules.own : nullptr;
+		detail::DescribeValue(merged, own, &rules.defaults, "", lines);
+		return lines;
 	}
 
 	// ------------------------------------------------------------------------------------------

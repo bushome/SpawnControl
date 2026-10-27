@@ -93,6 +93,40 @@ reloading is enabled in ArkServerApi's own `config.json`, it swaps it in.
 
 Comments are allowed. `configs\config.commented.json` has the same values with every setting explained.
 
+### One config for every server: SharedConfig
+
+Instead of a copy per server, the plugin's own `config.json` can hold a single line pointing at a shared file
+or folder:
+
+```json
+{ "SharedConfig": "D:\\servers\\shared\\SpawnControl" }
+```
+
+A relative path is taken from the plugin's folder. Every other key in that file is then ignored (with a
+warning). The path can be:
+
+- **a file**: a whole config in the usual layout, read by every server that points at it.
+- **a folder**: `config.json` for `General`, `Protect`, `Refresh` and `ReportFamilies` (and optionally
+  `Default` and `Maps`), `Default.json` for the `Default` section, and one `<section>.json` per map holding
+  only that map's rules, e.g. `Aberration.json` containing `{ "Limit": { ... }, "UnderMesh": { ... } }`. The
+  file name is the section name, matched as `Maps` sections are. A map file replaces a section of the same
+  name in the folder's `config.json` (with a warning). Other files are ignored.
+
+If the shared file or folder cannot be read, or any file in it is not valid JSON, the load fails: at startup
+nothing is ruled until it is fixed, and a reload keeps the rules already in force. The load line in the log,
+`SpawnControl.Reload` and `SpawnControl.Rules` name every file read, so a server that fell back to its own copy
+shows it. Without `SharedConfig` the plugin reads its own `config.json` as before.
+
+### Default
+
+A top-level `Default` section holds rules every map starts from; it takes the same keys as a map section.
+Each map section is laid over it: an object merges key by key (so a map's `Limit` adds to and overrides the
+default limits, and `"UnderMesh": { "ChecksPerSecond": 40 }` changes only that value), a list or a single
+value replaces the default one (a map's `Exclude` list replaces the default list, it does not add to it), and
+`null` deletes a default entry (`"Limit": { "Dodo_Character_BP_C": null }`). A map with no section of its own
+runs the `Default` rules as they are; without `Default` it runs none, as before. A problem in `Default` is
+reported once, as `Default.<key>`, not again for every map. `SpawnControl.Rules` shows the result on each server.
+
 ### General
 
 | Setting | Default | Meaning |
@@ -103,7 +137,7 @@ Comments are allowed. `configs\config.commented.json` has the same values with e
 | `NearPlayerDistance` | 10000 | Unreal units (300 = one foundation). Queued creatures closer than this to a player wait. |
 | `RefuseFullEntries` | true | Let zones skip spawn entries whose creatures are all blocked or at their limit. |
 | `IgnoreSummoned` | true | Leave creatures summoned by another creature (a Gloon's Revenant escorts) out of every rule: a wild creature that appears after the first census without a spawn zone spawning it. They are counted in the census and shown in `List`. Limit the summoner instead. |
-| `LogRemovals` | true | Once a minute, log how many creatures were removed and how many zone spawn entries were refused, by class. Once a class is at its limit, this shows how hard the zones still push for it. |
+| `LogRemovals` | true | Once a minute, log how many creatures were removed and how many zone spawn entries were refused, by class. Once a class is at its limit, this shows how hard the zones still push for it. Also the under-mesh lines: up to 20 a minute name each removal (or, in report mode, each new suspect), and one line a minute counts the rest. With it off none of these are logged; `List` shows the same counts and spots either way. |
 
 ### Protect
 
@@ -147,7 +181,7 @@ which one was picked and why.
 | `DensitySkip` | `{ "Caves": true, "Areas": [ { "Name": "City", "Location": [x, y, z], "RadiusInFoundations": r } ] }`. Where density rules do not apply: caves (no cave flag in the ASE API, so this does nothing there; use `Areas`), and horizontal circles of `r` foundations around a point (z is ignored; `ccc` in game gives x and y). Use it for places that are meant to be dense, such as a city, corrupted zones or a boss arena. Blocks, limits and groups still apply there. |
 | `BlockAreas` | `[ { "Name": "Spawner", "Location": [x, y, z], "RadiusInFoundations": r } ]`. Places where no wild creature belongs, such as a misplaced spawner or the space under the map. Every wild creature inside is removed whatever its class (tames, mission and protected creatures excepted), by the census and as soon as it spawns. A zone that puts 3 creatures inside and none anywhere else has all its spawn entries refused from then on, so it stops spawning there; the log names it and `List` shows it. With `[x, y, z]` the area is a sphere, so the ground above an underground spot is untouched; with `[x, y]` it is a column at any height. A reload clears what was learned about zones. The fullest-cube line under a density rule in `List` is a quick way to find such spots. |
 | `Overlap` | `{ "Fraction": 0.5, "Exclude": [...] }`. Creatures spawned inside one another: two overlap when their centres are closer than `Fraction` (0.1 to 1) of their summed collision radii, read from each creature's capsule. Of each stack, the one nearest a player stays and the rest are removed, before limits are counted. Riders, carried creatures, summoned, mission and protected creatures are never counted; `Exclude` works as for `Density`. Small flyers that pass through other creatures (Dragonfly) can be caught mid-pass; add them to `Exclude`. Leave the key out to turn it off. `List` shows how many the last census found and where. |
-| `UnderMesh` | `{ "ChecksPerSecond": 20, "Remove": false, "IncludeStasis": false, "Exclude": [...] }`. Reported always; removed only with `"Remove": true`. Creatures under the map or inside its geometry, found with the game's own under-mesh test (`UVictoryCore::IsUnderMesh`, the check that lifts a player who ghosts under the map). Each census queues the wild creatures; the timer tests them in a shuffled order at `ChecksPerSecond` (up to 1000), each creature once per census. By default only awake creatures (near players) are tested; with `IncludeStasis` creatures in stasis are tested too, which finds buried or broken spawners anywhere on the map at about 20 µs a test (a 21,000-creature map needs roughly 200 a second to cover it every census). Creatures the game flagged as spawned in a cave or in a block area are skipped. The ASE API has no map exclusion zones, so caves rely on the cave flag being absent here; check suspects before trusting them. `List` shows how many were tested, the cost per test and the last 10 suspects with location; the log names each new one (up to 20 a minute). With `Remove`, a creature is queued for removal only when the test finds it below the surface (not only overlapping, which a creature clipping a rock edge can show for a moment) on two separate censuses; a clear result in between starts over. The ASE API has no wild follower list, so followers are tested on their own. Caves tested clear on Lost Colony. `List` also groups the last 1,500 removals into repeat spots (3 or more within 10 foundations, not already in a block area) and prints each with a `BlockAreas` line to paste: a spot like that is a spawn point inside the terrain, and blocking it stops its zone instead of feeding the removal queue. |
+| `UnderMesh` | `{ "ChecksPerSecond": 20, "Remove": false, "IncludeStasis": false, "Exclude": [...] }`. Reported always; removed only with `"Remove": true`. Creatures under the map or inside its geometry, found with the game's own under-mesh test (`UVictoryCore::IsUnderMesh`, the check that lifts a player who ghosts under the map). Each census queues the wild creatures; the timer tests them in a shuffled order at `ChecksPerSecond` (up to 1000), each creature once per census. By default only awake creatures (near players) are tested; with `IncludeStasis` creatures in stasis are tested too, which finds buried or broken spawners anywhere on the map at about 20 µs a test (a 21,000-creature map needs roughly 200 a second to cover it every census). Creatures the game flagged as spawned in a cave or in a block area are skipped. The ASE API has no map exclusion zones, so caves rely on the cave flag being absent here; check suspects before trusting them. `List` shows how many were tested, the cost per test and the last 10 suspects with location; the log names each new one (up to 20 a minute, while `LogRemovals` is on and `Remove` is off). With `Remove`, a creature is queued for removal only when the test finds it below the surface (not only overlapping, which a creature clipping a rock edge can show for a moment) on two separate censuses; a clear result in between starts over. The ASE API has no wild follower list, so followers are tested on their own. Caves tested clear on Lost Colony. `List` also groups the last 1,500 removals into repeat spots (3 or more within 10 foundations, not already in a block area) and prints each with a `BlockAreas` line to paste: a spot like that is a spawn point inside the terrain, and blocking it stops its zone instead of feeding the removal queue. |
 
 Class keys are either a short class name (`Otter_Character_BP_C`), which matches every class of that name
 from any mod, or a full path exactly as `ListDinos` prints it
@@ -163,7 +197,8 @@ Admin console commands (`cheat SpawnControl.List`); both also work over RCON.
 | Command | What it does |
 |---|---|
 | `SpawnControl.List [text]` | Map, config section, last census, queue, removals, rolling refresh total, spawn-check timing, per-tick time spent on census slices and removals (average and worst, in ms), and zone entries checked and refused; then every limited or blocked class and every group with its count now and each member's count, the density rules with the 10 fullest cubes each found last census, one per spot (count, location for `setplayerpos`, top classes) (the last census minus what it queued for removal, plus spawns since), the report families and the ten largest classes without a rule. With text: every class whose path contains it, with counts, rules, full path and parent classes (for `Exclude` and `Protect.Families`). Also written to the log. |
-| `SpawnControl.Reload` | Re-reads `config.json`. A broken file keeps the old settings and reports the error. Live counts carry over, so limits keep holding without waiting for a census: classes that already had a rule keep their count, newly ruled classes start from the last census. |
+| `SpawnControl.Rules` | What this server is running with: the section and why it was picked, every file read, the General settings, then one line per map value saying whether it is the section's own or from `Default`, e.g. `UnderMesh.ChecksPerSecond = 40  (map; default 20)` or `Limit.Dodo_Character_BP_C removed  (map; default 250)`. Also written to the log. |
+| `SpawnControl.Reload` | Re-reads `config.json` (and the shared file or folder it points to). A broken file keeps the old settings and reports the error. Live counts carry over, so limits keep holding without waiting for a census: classes that already had a rule keep their count, newly ruled classes start from the last census. |
 | `SpawnControl.MeshHere [foundations]` | Console only. Runs the game's under-mesh test right now on every creature within that many foundations of you (default 30, up to 200), whatever its state, prints how many came back clear and under, and lists each one, under first, then nearest first: class, distance, height difference, wild/mission/summoned/tamed, awake or in stasis, and the result (`UNDER (overlapping)`, `UNDER (below)` or `clear`) with what the test hit. For checking suspects and finding misses. Also written to the log. |
 
 ## Troubleshooting

@@ -11,6 +11,7 @@
 // configs\config.commented.json holds the same values, so it must pass the same check.
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -659,6 +660,156 @@ static void TestRefresh()
 	CHECK(!SkipsRefresh(settings, rex));
 }
 
+static bool HasLine(const std::vector<std::string>& lines, const std::string& text)
+{
+	return std::find(lines.begin(), lines.end(), text) != lines.end();
+}
+
+static bool AnyContains(const std::vector<std::string>& lines, const std::string& text)
+{
+	return std::any_of(lines.begin(), lines.end(), [&](const std::string& line) { return line.find(text) != std::string::npos; });
+}
+
+static int LimitOf(const MapRules& rules, const std::string& key)
+{
+	for (const auto& [name, max] : rules.limits)
+	{
+		if (name == key)
+			return max;
+	}
+	return -1;
+}
+
+static void TestDefaultSection()
+{
+	const Settings settings = ParseConfigText(R"({
+		"Default": {
+			"Limit": { "Dodo_Character_BP_C": 250, "Lystro_Character_BP_C": 250 },
+			"Overlap": { "Fraction": 0.5, "Exclude": [ "Thrall" ] },
+			"UnderMesh": { "ChecksPerSecond": 20, "Remove": true, "Exclude": [ "/Nameless/" ] }
+		},
+		"Maps": {
+			"Aberration": {
+				"Limit": { "Dodo_Character_BP_C": 300, "Lystro_Character_BP_C": null, "Lightbug_Character_BP_C": 400 },
+				"UnderMesh": { "ChecksPerSecond": 40 }
+			},
+			"Island": { "Overlap": { "Exclude": [] } }
+		}
+	})");
+	CHECK(settings.warnings.empty());
+	CHECK(settings.has_default);
+	const MapRules* aberration = FindMapRules(settings, "Aberration_WP");
+	CHECK(aberration != nullptr);
+	if (aberration == nullptr)
+		return;
+	CHECK(LimitOf(*aberration, "Dodo_Character_BP_C") == 300);
+	CHECK(LimitOf(*aberration, "Lystro_Character_BP_C") == -1);   // null deletes the default
+	CHECK(LimitOf(*aberration, "Lightbug_Character_BP_C") == 400);
+	CHECK(aberration->limits.size() == 2);
+	CHECK(aberration->under_mesh.enabled && aberration->under_mesh.checks_per_second == 40 && aberration->under_mesh.remove);
+	CHECK(aberration->under_mesh.exclude.size() == 1);
+	CHECK(aberration->overlap.enabled && aberration->overlap.fraction == 0.5 && aberration->overlap.exclude.size() == 1);
+
+	const MapRules* island = FindMapRules(settings, "TheIsland_WP");
+	CHECK(island == nullptr);   // matched by section name only
+	island = FindMapRules(settings, "Island");
+	CHECK(island != nullptr && island->overlap.exclude.empty() && LimitOf(*island, "Dodo_Character_BP_C") == 250);
+
+	// A map with no section runs the Default rules (the plugin falls back to default_rules).
+	CHECK(FindMapRules(settings, "Ragnarok_WP") == nullptr);
+	CHECK(settings.default_rules.under_mesh.checks_per_second == 20 && settings.default_rules.limits.size() == 2);
+
+	const std::vector<std::string> lines = DescribeRules(*aberration);
+	CHECK(HasLine(lines, "UnderMesh.ChecksPerSecond = 40  (map; default 20)"));
+	CHECK(HasLine(lines, "UnderMesh.Remove = true  (default)"));
+	CHECK(HasLine(lines, "Limit.Dodo_Character_BP_C = 300  (map; default 250)"));
+	CHECK(HasLine(lines, "Limit.Lightbug_Character_BP_C = 400  (map)"));
+	CHECK(HasLine(lines, "Limit.Lystro_Character_BP_C removed  (map; default 250)"));
+	CHECK(HasLine(lines, "Overlap.Exclude = [\"Thrall\"]  (default)"));
+	const std::vector<std::string> fallback = DescribeRules(settings.default_rules);
+	CHECK(HasLine(fallback, "UnderMesh.ChecksPerSecond = 20  (default)"));
+	CHECK(!AnyContains(fallback, "(map"));
+
+	// A bad value in Default is reported once, as Default, not again for every map inheriting it.
+	const Settings bad = ParseConfigText(R"({
+		"Default": { "Overlap": { "Fraction": 5 } },
+		"Maps": { "A": {}, "B": { "Overlap": { "Fraction": 7 } } }
+	})");
+	CHECK(AnyContains(bad.warnings, "Default.Overlap.Fraction"));
+	CHECK(!AnyContains(bad.warnings, "Maps.A.Overlap"));
+	CHECK(AnyContains(bad.warnings, "Maps.B.Overlap.Fraction"));   // its own bad value still counts
+
+	const Settings misplaced = ParseConfigText(R"({ "Maps": { "Default": { "Overlap": {} } } })");
+	CHECK(AnyContains(misplaced.warnings, "Maps.Default is read as a map named Default"));
+	CHECK(!misplaced.has_default);
+
+	const Settings unknown = ParseConfigText(R"({ "Default": { "Limits": {} } })");
+	CHECK(AnyContains(unknown.warnings, "Default.Limits is not a known setting"));
+}
+
+static void WriteText(const std::filesystem::path& path, const std::string& text)
+{
+	std::filesystem::create_directories(path.parent_path());
+	std::ofstream file(path, std::ios::binary | std::ios::trunc);
+	file << text;
+}
+
+static void TestSharedConfig()
+{
+	namespace fs = std::filesystem;
+	const fs::path root = fs::temp_directory_path() / "spawncontrol_shared_test";
+	fs::remove_all(root);
+	const fs::path plugin = root / "server" / "ArkApi" / "Plugins" / "SpawnControl";
+
+	// No SharedConfig: the plugin's own file, as before.
+	WriteText(plugin / "config.json", R"({ "General": { "RemovalsPerTick": 4 }, "Maps": { "Center": {} } })");
+	Settings local = LoadConfigFiles(plugin);
+	CHECK(local.removals_per_tick == 4 && local.maps.size() == 1 && local.sources.size() == 1);
+
+	// A shared folder, given relative to the plugin folder.
+	WriteText(plugin / "config.json", R"({ "SharedConfig": "../../../../shared", "General": { "RemovalsPerTick": 99 } })");
+	WriteText(root / "shared" / "config.json", R"({ "General": { "RemovalsPerTick": 7 } })");
+	WriteText(root / "shared" / "Default.json", R"({ "Overlap": { "Fraction": 0.5 }, "Limit": { "Dodo_Character_BP_C": 250 } })");
+	WriteText(root / "shared" / "Aberration.json", R"({ "Limit": { "Dodo_Character_BP_C": 300, }, })");
+	WriteText(root / "shared" / "Center.json", R"({ "UnderMesh": { "Remove": true } })");
+	WriteText(root / "shared" / "notes.txt", "not json");
+	Settings shared = LoadConfigFiles(plugin);
+	CHECK(shared.removals_per_tick == 7);
+	CHECK(shared.has_default && shared.maps.size() == 2);
+	CHECK(shared.sources.size() == 4);
+	CHECK(AnyContains(shared.warnings, "General ignored; with SharedConfig"));
+	CHECK(AnyContains(shared.warnings, "Aberration.json line 1: comma"));
+	const MapRules* aberration = FindMapRules(shared, "Aberration_WP");
+	CHECK(aberration != nullptr && LimitOf(*aberration, "Dodo_Character_BP_C") == 300 && aberration->overlap.enabled);
+	const MapRules* center = FindMapRules(shared, "Center");
+	CHECK(center != nullptr && LimitOf(*center, "Dodo_Character_BP_C") == 250 && center->under_mesh.remove);
+
+	// A map file replaces the same section written in the shared config.json, with a warning.
+	WriteText(root / "shared" / "config.json", R"({ "Maps": { "center": { "Limit": { "X_C": 1 } } } })");
+	shared = LoadConfigFiles(plugin);
+	CHECK(AnyContains(shared.warnings, "Center.json replaces the Maps.center section"));
+	center = FindMapRules(shared, "Center");
+	CHECK(center != nullptr && LimitOf(*center, "X_C") == -1);
+
+	// A shared file, by absolute path.
+	WriteText(root / "one.json", R"({ "SharedConfig": "elsewhere", "Maps": { "Island": {} } })");
+	WriteText(plugin / "config.json", "{ \"SharedConfig\": " + nlohmann::json(SpawnControl::detail::Utf8FromPath(root / "one.json")).dump() + " }");
+	Settings file = LoadConfigFiles(plugin);
+	CHECK(file.maps.size() == 1 && file.sources.size() == 1);
+	CHECK(AnyContains(file.warnings, "one.json: SharedConfig ignored"));
+
+	// Missing or broken shared files throw, so a reload keeps what is in force.
+	WriteText(plugin / "config.json", R"({ "SharedConfig": "../nowhere" })");
+	CHECK_THROWS(LoadConfigFiles(plugin));
+	WriteText(plugin / "config.json", R"({ "SharedConfig": "../../../../shared" })");
+	WriteText(root / "shared" / "Island.json", R"({ "Limit": { )");
+	CHECK_THROWS(LoadConfigFiles(plugin));
+	WriteText(plugin / "config.json", R"({ "SharedConfig": 5 })");
+	CHECK_THROWS(LoadConfigFiles(plugin));
+
+	fs::remove_all(root);
+}
+
 static void TestConfigFile(const std::string& path, bool shipped_expectations)
 {
 	std::ifstream file(path);
@@ -728,6 +879,8 @@ int main(int argc, char** argv)
 	TestOverOnSpawn();
 	TestIsFull();
 	TestRefresh();
+	TestDefaultSection();
+	TestSharedConfig();
 
 	if (argc > 1)
 		TestConfigFile(argv[1], argc > 2 && std::string(argv[2]) == "--shipped");
