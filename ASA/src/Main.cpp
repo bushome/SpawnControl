@@ -212,9 +212,23 @@ namespace
 		int outside = 0;
 		bool stopped = false;
 		std::string area;     // the block area it spawned into
+		int under = 0;        // its creatures removed under the mesh
+		int clear = 0;        // its creatures that tested clear
+		bool by_mesh = false; // stopped for spawning under the mesh, not into a block area
 	};
-	std::unordered_map<ANPCZoneManager*, ZoneStats> g_zone_stats;  // only while block areas are configured
-	size_t g_zones_stopped = 0;
+	// Zones that spawned into a block area or under the mesh since the last reload.
+	std::unordered_map<ANPCZoneManager*, ZoneStats> g_zone_stats;
+	size_t g_zones_stopped = 0;        // by block areas
+	size_t g_mesh_zones_stopped = 0;   // by under-mesh removals
+
+	// The zone each creature spawned from, while UnderMesh.StopZones is on. Pruned each census.
+	struct CreatureOrigin
+	{
+		ANPCZoneManager* zone = nullptr;
+		bool counted_clear = false;
+		uint32_t last_seen = 0;   // census number
+	};
+	std::unordered_map<uint64_t, CreatureOrigin> g_creature_zone;
 
 	// Under-mesh report: each census queues the creatures to test; the timer tests the awake ones at
 	// UnderMesh.ChecksPerSecond with the game's own under-mesh test. Nothing is removed.
@@ -513,6 +527,9 @@ namespace
 		g_zone_stats.clear(); // block areas may have changed; stopped zones are learned again
 		g_mesh_queue.clear(); // classes may have left the under-mesh rule; the next census queues again
 		g_zones_stopped = 0;
+		g_mesh_zones_stopped = 0;
+		for (auto& [key, origin] : g_creature_zone)
+			origin.counted_clear = false; // zone counts start over with the stats
 
 		std::vector<bool> had_rule(g_classes.size(), false);
 		for (size_t c = 0; c < g_classes.size(); ++c)
@@ -947,6 +964,18 @@ namespace
 		g_building.overlap_samples = plan.overlap_samples;
 
 		++g_census_number;
+		if (!g_creature_zone.empty())
+		{
+			for (const CensusItem& item : g_census_items)
+			{
+				const auto origin = g_creature_zone.find(WeakKey(item.creature));
+				if (origin != g_creature_zone.end())
+					origin->second.last_seen = g_census_number;
+			}
+			// Gone since the census before last (spawns during a census carry the number they spawned at).
+			for (auto it = g_creature_zone.begin(); it != g_creature_zone.end();)
+				it = it->second.last_seen + 1 < g_census_number ? g_creature_zone.erase(it) : std::next(it);
+		}
 		for (auto it = g_mesh_first_below.begin(); it != g_mesh_first_below.end();)
 			// Forgotten only after many censuses: on a map where tests are expensive (Aberration: ~260 us each) a low
 			// ChecksPerSecond reaches each creature only every several censuses, and the second strike must still count.
@@ -1041,6 +1070,46 @@ namespace
 		return zone != nullptr ? reinterpret_cast<AActor*>(zone)->GetLocation() : FVector(0, 0, 0);
 	}
 
+	// Under-mesh zone stopping: on with UnderMesh Remove and StopZones, and only when spawns can be traced to
+	// their zone.
+	bool MeshZoneStopping()
+	{
+		return g_zone_hook_installed && g_rules != nullptr && g_rules->under_mesh.enabled && g_rules->under_mesh.remove &&
+			g_rules->under_mesh.stop_zones;
+	}
+
+	void NoteMeshZoneClear(uint64_t creature_key)
+	{
+		const auto origin = g_creature_zone.find(creature_key);
+		if (origin == g_creature_zone.end() || origin->second.counted_clear)
+			return;
+		origin->second.counted_clear = true;
+		++g_zone_stats[origin->second.zone].clear;
+	}
+
+	// A creature removed under the mesh counts against the zone that spawned it; a zone whose creatures end up
+	// there and hardly anywhere else is stopped.
+	void NoteMeshZoneRemoval(uint64_t creature_key)
+	{
+		const auto origin = g_creature_zone.find(creature_key);
+		if (origin == g_creature_zone.end())
+			return;
+		ANPCZoneManager* const zone = origin->second.zone;
+		g_creature_zone.erase(origin);
+		if (!MeshZoneStopping())
+			return;
+		ZoneStats& stats = g_zone_stats[zone];
+		++stats.under;
+		if (stats.stopped || !MeshZoneShouldStop(stats.under, stats.clear))
+			return;
+		stats.stopped = true;
+		stats.by_mesh = true;
+		++g_mesh_zones_stopped;
+		const FVector at = ActorLocationOf(zone);
+		Log::GetLog()->warn("Zone {} had {} of its creatures removed under the mesh and {} test clear; its spawn entries are "
+			"refused from now on (zone at {:.0f} {:.0f} {:.0f})", ObjectName(zone), stats.under, stats.clear, at.X, at.Y, at.Z);
+	}
+
 	// Spawns by a zone into a block area, and the zone that keeps doing only that is stopped.
 	void NoteZoneSpawn(ANPCZoneManager* zone, int area)
 	{
@@ -1074,6 +1143,14 @@ namespace
 		const ClassRule& rule = g_classes[class_index].rule;
 		if (rule.is_protected)
 			return;
+
+		if (MeshZoneStopping() && g_zone_spawn_depth > 0 && g_current_zone != nullptr)
+		{
+			CreatureOrigin origin;
+			origin.zone = g_current_zone;
+			origin.last_seen = g_census_number;
+			g_creature_zone[WeakKey(GetWeakReference(dino))] = origin;
+		}
 
 		if (!g_rules->block_areas.empty())
 		{
@@ -1340,6 +1417,8 @@ namespace
 			UActorComponent* hit = nullptr;
 			const auto start = Clock::now();
 			const bool under = UVictoryCore::IsUnderMesh(dino, &hit_location, &overlapping, &hit, false, 0.0f);
+			if (!under && !g_creature_zone.empty())
+				NoteMeshZoneClear(key);
 			const double us = std::chrono::duration<double, std::micro>(Clock::now() - start).count();
 			g_mesh_total_us += us;
 			g_mesh_max_us = (std::max)(g_mesh_max_us, us);
@@ -1360,7 +1439,10 @@ namespace
 					g_mesh_first_below[key] = first;
 			}
 			if (confirmed)
+			{
 				RemoveUnderMesh(dino, candidate.class_index, location);
+				NoteMeshZoneRemoval(key);
+			}
 			if (!under || !g_mesh_reported.insert(key).second)
 				continue;
 
@@ -1575,7 +1657,7 @@ namespace
 					<< " entries refused)\n";
 				for (const auto& [zone, stats] : g_zone_stats)
 				{
-					if (stats.stopped)
+					if (stats.stopped && !stats.by_mesh)
 						out << "    stopped: " << ObjectName(zone) << " (" << stats.inside << " spawned into " << stats.area << ")\n";
 				}
 			}
@@ -1592,6 +1674,25 @@ namespace
 					out << "; " << g_mesh_removal_queued << " queued for removal since load, " << g_mesh_first_below.size()
 						<< " found below once, waiting for a second census";
 				out << "\n";
+				if (MeshZoneStopping())
+				{
+					size_t tracked_zones = 0;
+					for (const auto& [zone, stats] : g_zone_stats)
+						tracked_zones += stats.under > 0 ? 1 : 0;
+					out << "    zones stopped for spawning under the mesh: " << g_mesh_zones_stopped << " (stop after "
+						<< kMeshZoneStopAfter << " removals with at most 1 clear per " << kMeshZoneClearRatio << "; " << tracked_zones
+						<< " zones with removals since reload, " << g_creature_zone.size() << " creatures traced to their zone)\n";
+					for (const auto& [zone, stats] : g_zone_stats)
+					{
+						if (stats.stopped && stats.by_mesh)
+						{
+							const FVector at = ActorLocationOf(zone);
+							out << "      stopped: " << ObjectName(zone) << " (" << stats.under << " removed, " << stats.clear
+								<< " clear; zone at " << static_cast<int>(at.X) << " " << static_cast<int>(at.Y) << " "
+								<< static_cast<int>(at.Z) << ")\n";
+						}
+					}
+				}
 				if (!g_mesh_suspects_by_class.empty())
 				{
 					std::vector<std::pair<uint32_t, int>> by_class;

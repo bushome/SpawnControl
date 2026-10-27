@@ -182,8 +182,21 @@ namespace SpawnControl
 		int checks_per_second = 20;        // game under-mesh tests per second, each on one awake creature
 		bool remove = false;
 		bool include_stasis = false;       // also test creatures in stasis, far from any player
+		bool stop_zones = true;            // with remove: stop a zone whose spawns end up under the mesh
 		std::vector<std::string> exclude;
 	};
+
+	// A spawn zone whose creatures keep being removed under the mesh, while hardly any of them test clear,
+	// is spawning into the geometry: it is stopped like a zone that spawns only into a block area. Each
+	// creature counts once, by the zone that spawned it. A zone that also spawns where creatures belong
+	// (a real cave behind a bad wall) keeps enough clear creatures never to be stopped.
+	constexpr int kMeshZoneStopAfter = 5;     // removals under the mesh before a zone can be stopped
+	constexpr int kMeshZoneClearRatio = 5;    // ...and at most one clear creature per this many removals
+
+	inline bool MeshZoneShouldStop(int removed_under, int tested_clear)
+	{
+		return removed_under >= kMeshZoneStopAfter && tested_clear * kMeshZoneClearRatio <= removed_under;
+	}
 
 	// Under-mesh removal needs two "below" results from different censuses; a creature only clipping a rock
 	// edge ("overlapping") or found below once is never removed. Returns true when this result confirms it.
@@ -501,7 +514,7 @@ namespace SpawnControl
 			{
 				const nlohmann::json& under = section["UnderMesh"];
 				if (!under.is_object())
-					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, IncludeStasis and Exclude; ignored");
+					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, IncludeStasis, StopZones and Exclude; ignored");
 				else
 				{
 					rules.under_mesh.enabled = true;
@@ -511,14 +524,15 @@ namespace SpawnControl
 						warnings.push_back(where + "UnderMesh.ChecksPerSecond above 1000; using 1000");
 					rules.under_mesh.exclude = ReadStrings(under, "Exclude", {}, warnings, where + "UnderMesh.");
 					for (const auto& [key, target] : { std::pair<const char*, bool*>{ "Remove", &rules.under_mesh.remove },
-							std::pair<const char*, bool*>{ "IncludeStasis", &rules.under_mesh.include_stasis } })
+							std::pair<const char*, bool*>{ "IncludeStasis", &rules.under_mesh.include_stasis },
+							std::pair<const char*, bool*>{ "StopZones", &rules.under_mesh.stop_zones } })
 					{
 						if (!under.contains(key))
 							continue;
 						if (under[key].is_boolean())
 							*target = under[key].get<bool>();
 						else
-							warnings.push_back(where + "UnderMesh." + key + " must be true or false; using false");
+							warnings.push_back(where + "UnderMesh." + key + " must be true or false; using " + (*target ? "true" : "false"));
 					}
 				}
 			}
@@ -597,7 +611,7 @@ namespace SpawnControl
 			if (map.contains("Overlap"))
 				WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
 			if (map.contains("UnderMesh"))
-				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "IncludeStasis", "Exclude" }, where + "UnderMesh.", warnings);
+				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "IncludeStasis", "StopZones", "Exclude" }, where + "UnderMesh.", warnings);
 		}
 
 		inline void WarnUnknownKeys(const nlohmann::json& root, std::vector<std::string>& warnings)

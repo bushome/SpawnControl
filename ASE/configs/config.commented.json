@@ -149,6 +149,10 @@
         // Also test creatures in stasis, far from players: finds buried or broken spawners anywhere.
         // Raise ChecksPerSecond with it (about 200 covers a 21,000-creature map every census).
         "IncludeStasis": false,
+        // With Remove: a spawn zone whose creatures keep being removed under the mesh (5 or more, with at most
+        // one clear creature per 5 removed) is stopped, as block areas stop zones. List names each one; a reload
+        // starts over. Zones that also spawn where creatures belong are never stopped.
+        "StopZones": true,
         "Exclude": []
       },
       "BlockAreas": [

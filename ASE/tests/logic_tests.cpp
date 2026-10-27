@@ -810,6 +810,23 @@ static void TestSharedConfig()
 	fs::remove_all(root);
 }
 
+static void TestMeshZoneStop()
+{
+	CHECK(!MeshZoneShouldStop(4, 0));     // too few removals yet
+	CHECK(MeshZoneShouldStop(5, 0));
+	CHECK(MeshZoneShouldStop(5, 1));      // one clear creature in five removals
+	CHECK(!MeshZoneShouldStop(5, 2));
+	CHECK(!MeshZoneShouldStop(20, 5));    // a zone that also spawns where creatures belong keeps going
+	CHECK(MeshZoneShouldStop(20, 4));
+
+	const Settings on = ParseConfigText(R"({ "Maps": { "A": { "UnderMesh": { "Remove": true } } } })");
+	CHECK(on.maps[0].under_mesh.stop_zones);   // on by default; acts only with Remove
+	const Settings off = ParseConfigText(R"({ "Maps": { "A": { "UnderMesh": { "Remove": true, "StopZones": false } } } })");
+	CHECK(!off.maps[0].under_mesh.stop_zones && off.warnings.empty());
+	const Settings bad = ParseConfigText(R"({ "Maps": { "A": { "UnderMesh": { "StopZones": "yes" } } } })");
+	CHECK(bad.maps[0].under_mesh.stop_zones && AnyContains(bad.warnings, "StopZones must be true or false; using true"));
+}
+
 static void TestConfigFile(const std::string& path, bool shipped_expectations)
 {
 	std::ifstream file(path);
@@ -881,6 +898,7 @@ int main(int argc, char** argv)
 	TestRefresh();
 	TestDefaultSection();
 	TestSharedConfig();
+	TestMeshZoneStop();
 
 	if (argc > 1)
 		TestConfigFile(argv[1], argc > 2 && std::string(argv[2]) == "--shipped");
