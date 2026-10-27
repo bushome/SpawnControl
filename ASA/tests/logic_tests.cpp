@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 
 #include "SpawnLogic.h"
@@ -472,6 +473,13 @@ static void TestOverlap()
 	Creature small; small.id = 1; small.class_index = 0; small.radius = 100; small.x = 400; small.player_distance = 2; mixed.push_back(small);
 	CHECK(PlanRemovals(rules, {}, mixed).overlapping == 1);
 	CHECK(PlanRemovals(rules, {}, mixed, {}, {}, 0.3).overlapping == 0); // 400 > 1100 * 0.3
+
+	// A bad radius (a creature being torn down) is ignored rather than making every pair a neighbour.
+	std::vector<Creature> bad = creatures;
+	bad[4].radius = 1.0e30;
+	CHECK(PlanRemovals(rules, {}, bad).overlapping == 2);
+	bad[4].radius = std::numeric_limits<double>::quiet_NaN();
+	CHECK(PlanRemovals(rules, {}, bad).overlapping == 2);
 
 	// Overlap removals count before limits, so a limit does not also take a creature that was not stacked.
 	rules[0].limit = 4;

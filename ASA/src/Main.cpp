@@ -105,6 +105,7 @@ namespace
 		size_t too_dense = 0;                 // planned by density rules
 		size_t in_block_area = 0;             // planned because they are inside a block area
 		size_t overlapping = 0;               // planned because they sit inside another creature
+		double plan_ms = 0;                   // time to plan the removals at the end of the census
 		std::vector<OverlapSample> overlap_samples;
 		std::vector<std::vector<DensityHotspot>> hotspots; // fullest cubes per density rule
 		std::vector<int> summoned_by_class;   // the summoned part of wild_by_class
@@ -402,8 +403,8 @@ namespace
 
 	Kind Classify(APrimalDinoCharacter* dino)
 	{
-		if (dino == nullptr || dino->IsDead())
-			return Kind::Other;
+		if (dino == nullptr || dino->IsDead() || dino->bActorIsBeingDestroyed()())
+			return Kind::Other; // dead or on its way out: its fields (bounds among them) are no longer trustworthy
 		if (dino->TargetingTeamField() >= kFirstPlayerTeam)
 			return Kind::Other;
 		if (dino->OwnerMissionField() != nullptr)
@@ -879,7 +880,9 @@ namespace
 		static const DensitySkip default_skip;
 		const DensitySkip& skip = g_rules != nullptr ? g_rules->density_skip : default_skip;
 		const double overlap_fraction = g_rules != nullptr ? g_rules->overlap.fraction : 0.5;
+		const auto plan_start = Clock::now();
 		const Plan plan = PlanRemovals(rules, groups, creatures, density, skip, overlap_fraction);
+		const double plan_ms = std::chrono::duration<double, std::milli>(Clock::now() - plan_start).count();
 
 		// Live counts start from what each rule leaves after the planned removals.
 		g_class_counts.assign(g_classes.size(), 0);
@@ -916,6 +919,9 @@ namespace
 		g_building.too_dense = plan.too_dense;
 		g_building.in_block_area = plan.in_block_area;
 		g_building.overlapping = plan.overlapping;
+		g_building.plan_ms = plan_ms;
+		if (plan_ms > 50)
+			Log::GetLog()->warn("Census planning took {:.0f} ms for {} creatures", plan_ms, creatures.size());
 		g_building.overlap_samples = plan.overlap_samples;
 
 		++g_census_number;
@@ -1377,7 +1383,7 @@ namespace
 		const double age = std::chrono::duration<double>(Clock::now() - g_last.finished).count();
 		out << "Census " << static_cast<int>(age) << " s ago (" << std::fixed;
 		out.precision(1);
-		out << g_last.seconds << " s, " << g_last.actors << " actors): " << g_last.wild << " wild, "
+		out << g_last.seconds << " s, " << g_last.actors << " actors, planned in " << g_last.plan_ms << " ms): " << g_last.wild << " wild, "
 			<< g_last.mission << " mission-owned";
 		if (g_last.summoned > 0)
 			out << ", " << g_last.summoned << " of the wild summoned by another creature (not limited)";

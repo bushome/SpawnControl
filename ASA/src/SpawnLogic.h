@@ -829,6 +829,9 @@ namespace SpawnControl
 		int kept_class = -1;
 	};
 	constexpr size_t kOverlapSamples = 10;
+	// No creature's collision radius comes near this; a larger value is a bad read (a creature being torn
+	// down, say), and counting it would make the overlap sweep compare every pair on the map.
+	constexpr double kMaxOverlapRadius = 3000.0;
 
 	inline bool SkipsDensity(const DensitySkip& skip, const Creature& creature)
 	{
@@ -899,7 +902,8 @@ namespace SpawnControl
 			{
 				const Creature& c = creatures[i];
 				if (c.class_index < 0 || static_cast<size_t>(c.class_index) >= rules.size() || rules[c.class_index].is_protected ||
-					!rules[c.class_index].overlap || c.in_block_area || c.attached || c.radius <= 0)
+					!rules[c.class_index].overlap || c.in_block_area || c.attached || !(c.radius > 0 && c.radius <= kMaxOverlapRadius) ||
+					!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z))
 					continue;
 				order.push_back(i);
 				largest = (std::max)(largest, c.radius);
