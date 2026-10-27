@@ -215,7 +215,21 @@ namespace
 		int under = 0;        // its creatures removed under the mesh
 		int clear = 0;        // its creatures that tested clear
 		bool by_mesh = false; // stopped for spawning under the mesh, not into a block area
+		double x = 0, y = 0, z = 0; // where its last counted creature was: zone managers have no useful location
 	};
+
+	// Zones whose spawns are almost all removed on arrival for being over a limit (see ChurnWindow).
+	struct ZoneChurn
+	{
+		ChurnWindow window;
+		std::vector<int> classes;   // classes it spawned over their limit, newest kept
+		bool holding = false;       // spawning held back while those classes are full
+		int holds = 0;              // times it was held back since the last reload
+		double x = 0, y = 0, z = 0;
+	};
+	std::unordered_map<ANPCZoneManager*, ZoneChurn> g_zone_churn;
+	uint64_t g_churn_held_calls = 0;      // zone spawn passes skipped for churning zones
+	uint64_t g_entry_unloaded_class = 0;  // entries that could not be judged: a class not loaded through that entry
 	// Zones that spawned into a block area or under the mesh since the last reload.
 	std::unordered_map<ANPCZoneManager*, ZoneStats> g_zone_stats;
 	size_t g_zones_stopped = 0;        // by block areas
@@ -528,6 +542,7 @@ namespace
 		g_mesh_queue.clear(); // classes may have left the under-mesh rule; the next census queues again
 		g_zones_stopped = 0;
 		g_mesh_zones_stopped = 0;
+		g_zone_churn.clear(); // limits may have changed
 		for (auto& [key, origin] : g_creature_zone)
 			origin.counted_clear = false; // zone counts start over with the stats
 
@@ -588,7 +603,7 @@ namespace
 			g_settings = std::move(settings);
 			g_settings_loaded = true;
 			ApplyRules();
-			Log::GetLog()->info("Config loaded from {}: {} map section(s){}; using {} for {}", SourcesText(),
+			Log::GetLog()->info("Config loaded from {}: {} map section(s){}; using {} for {}", SummarizeSources(g_settings.sources),
 				g_settings.maps.size(), g_settings.has_default ? " and Default" : "",
 				g_rules != nullptr ? g_rules->name : std::string("no section"), g_section_source);
 			return true;
@@ -1065,11 +1080,6 @@ namespace
 		return object != nullptr ? object->NameField().ToString().ToString() : std::string("?");
 	}
 
-	FVector ActorLocationOf(ANPCZoneManager* zone)
-	{
-		return zone != nullptr ? reinterpret_cast<AActor*>(zone)->GetLocation() : FVector(0, 0, 0);
-	}
-
 	// Under-mesh zone stopping: on with UnderMesh Remove and StopZones, and only when spawns can be traced to
 	// their zone.
 	bool MeshZoneStopping()
@@ -1089,7 +1099,7 @@ namespace
 
 	// A creature removed under the mesh counts against the zone that spawned it; a zone whose creatures end up
 	// there and hardly anywhere else is stopped.
-	void NoteMeshZoneRemoval(uint64_t creature_key)
+	void NoteMeshZoneRemoval(uint64_t creature_key, const FVector& location)
 	{
 		const auto origin = g_creature_zone.find(creature_key);
 		if (origin == g_creature_zone.end())
@@ -1100,24 +1110,30 @@ namespace
 			return;
 		ZoneStats& stats = g_zone_stats[zone];
 		++stats.under;
+		stats.x = static_cast<double>(location.X);
+		stats.y = static_cast<double>(location.Y);
+		stats.z = static_cast<double>(location.Z);
 		if (stats.stopped || !MeshZoneShouldStop(stats.under, stats.clear))
 			return;
 		stats.stopped = true;
 		stats.by_mesh = true;
 		++g_mesh_zones_stopped;
-		const FVector at = ActorLocationOf(zone);
 		Log::GetLog()->warn("Zone {} had {} of its creatures removed under the mesh and {} test clear; its spawn entries are "
-			"refused from now on (zone at {:.0f} {:.0f} {:.0f})", ObjectName(zone), stats.under, stats.clear, at.X, at.Y, at.Z);
+			"refused from now on (last removal at {:.0f} {:.0f} {:.0f})", ObjectName(zone), stats.under, stats.clear, stats.x, stats.y,
+			stats.z);
 	}
 
 	// Spawns by a zone into a block area, and the zone that keeps doing only that is stopped.
-	void NoteZoneSpawn(ANPCZoneManager* zone, int area)
+	void NoteZoneSpawn(ANPCZoneManager* zone, int area, const FVector& location)
 	{
 		ZoneStats& stats = g_zone_stats[zone];
 		if (area >= 0)
 		{
 			++stats.inside;
 			stats.area = g_rules->block_areas[area].name;
+			stats.x = static_cast<double>(location.X);
+			stats.y = static_cast<double>(location.Y);
+			stats.z = static_cast<double>(location.Z);
 		}
 		else
 			++stats.outside;
@@ -1125,11 +1141,57 @@ namespace
 		{
 			stats.stopped = true;
 			++g_zones_stopped;
-			const FVector at = ActorLocationOf(zone);
 			Log::GetLog()->warn("Zone {} spawned {} creatures only inside block area {}; its spawn entries are refused from now on "
-				"(zone at {:.0f} {:.0f} {:.0f})", ObjectName(zone), stats.inside, stats.area.empty() ? std::string("(unnamed)") : stats.area,
-				at.X, at.Y, at.Z);
+				"(last one at {:.0f} {:.0f} {:.0f})", ObjectName(zone), stats.inside, stats.area.empty() ? std::string("(unnamed)") : stats.area,
+				stats.x, stats.y, stats.z);
 		}
+	}
+
+	// Each zone spawn, kept or removed on arrival for being over a limit. A zone that only feeds the removal
+	// queue is held back (Hook_ANPCZoneManager_SpawnNPCs) while the classes it churned are full.
+	void NoteZoneOutcome(ANPCZoneManager* zone, int class_index, bool removed, const FVector& location)
+	{
+		ZoneChurn& churn = g_zone_churn[zone];
+		churn.window.Add(removed);
+		if (removed)
+		{
+			auto known = std::find(churn.classes.begin(), churn.classes.end(), class_index);
+			if (known != churn.classes.end())
+				churn.classes.erase(known);
+			churn.classes.insert(churn.classes.begin(), class_index);
+			if (churn.classes.size() > 4)
+				churn.classes.pop_back();
+			churn.x = static_cast<double>(location.X);
+			churn.y = static_cast<double>(location.Y);
+			churn.z = static_cast<double>(location.Z);
+		}
+		if (churn.holding || !churn.window.Churning())
+			return;
+		churn.holding = true;
+		if (++churn.holds == 1)
+		{
+			std::string names;
+			for (int c : churn.classes)
+				names += (names.empty() ? "" : ", ") + g_classes[c].info.short_name;
+			Log::GetLog()->warn("Zone {}: {} of its last {} spawns were over a limit and removed on arrival ({}); its spawning is held "
+				"back while they are full (last one at {:.0f} {:.0f} {:.0f})", ObjectName(zone), churn.window.Removed(), kChurnWindow, names,
+				churn.x, churn.y, churn.z);
+		}
+	}
+
+	// A held zone resumes as soon as any class it churned has room again.
+	bool ChurnStillFull(const ZoneChurn& churn)
+	{
+		if (!g_counts_ready || g_rules == nullptr || churn.classes.empty())
+			return false;
+		for (int c : churn.classes)
+		{
+			if (c < 0 || static_cast<size_t>(c) >= g_classes.size() || static_cast<size_t>(c) >= g_class_counts.size())
+				return false;
+			if (!IsFull(g_classes[c].rule, g_class_counts[c], g_group_counts, g_rules->groups))
+				return false;
+		}
+		return true;
 	}
 
 	void OnCreatureAppeared(APrimalDinoCharacter* dino)
@@ -1156,7 +1218,7 @@ namespace
 		{
 			const int area = InBlockArea(dino->GetLocation());
 			if (g_zone_spawn_depth > 0 && g_current_zone != nullptr)
-				NoteZoneSpawn(g_current_zone, area);
+				NoteZoneSpawn(g_current_zone, area, dino->GetLocation());
 			if (area >= 0)
 			{
 				if (Enqueue(dino, class_index, false, true))
@@ -1164,8 +1226,13 @@ namespace
 				return;
 			}
 		}
+		ANPCZoneManager* const zone = g_zone_spawn_depth > 0 ? g_current_zone : nullptr;
 		if (!HasAnyRule(rule))
+		{
+			if (zone != nullptr)
+				NoteZoneOutcome(zone, class_index, false, dino->GetLocation());
 			return;
+		}
 
 		// Live counts always mean "after everything already queued is gone".
 		AdjustCounts(class_index, +1);
@@ -1178,6 +1245,8 @@ namespace
 				kept = false;
 			}
 		}
+		if (zone != nullptr)
+			NoteZoneOutcome(zone, class_index, !kept, dino->GetLocation());
 		if (kept && g_census_running)
 		{
 			if (g_spawned_during_census.size() <= static_cast<size_t>(class_index))
@@ -1199,7 +1268,10 @@ namespace
 			UObject* loaded = reinterpret_cast<FWeakObjectPtr*>(&soft)->Get(false);
 			UClass* cls = static_cast<UClass*>(loaded);
 			if (cls == nullptr)
+			{
+				++g_entry_unloaded_class;
 				return false;
+			}
 			const int class_index = ClassIndexFor(cls);
 			const ClassRule& rule = g_classes[class_index].rule;
 			if (!IsFull(rule, g_class_counts[class_index], g_group_counts, g_rules->groups))
@@ -1256,6 +1328,19 @@ namespace
 
 	bool Hook_ANPCZoneManager_SpawnNPCs(ANPCZoneManager* _this)
 	{
+		if (!g_zone_churn.empty())
+		{
+			const auto churn = g_zone_churn.find(_this);
+			if (churn != g_zone_churn.end() && churn->second.holding)
+			{
+				if (ChurnStillFull(churn->second))
+				{
+					++g_churn_held_calls;
+					return false;
+				}
+				churn->second.holding = false;
+			}
+		}
 		++g_zone_spawn_depth;
 		++g_zone_spawn_calls;
 		ANPCZoneManager* const outer_zone = g_current_zone;
@@ -1441,7 +1526,7 @@ namespace
 			if (confirmed)
 			{
 				RemoveUnderMesh(dino, candidate.class_index, location);
-				NoteMeshZoneRemoval(key);
+				NoteMeshZoneRemoval(key, location);
 			}
 			if (!under || !g_mesh_reported.insert(key).second)
 				continue;
@@ -1517,7 +1602,30 @@ namespace
 		out << "Zone entries: " << g_entry_checks << " checked, " << g_entry_refused << " refused, avg "
 			<< (g_entry_checks > 0 ? g_entry_total_us / g_entry_checks : 0.0) << " us, max " << g_entry_max_us << " us"
 			<< (g_entry_hook_installed ? "" : " (hook not installed)")
-			<< (g_settings.refuse_full_entries ? "" : " (RefuseFullEntries off)") << "\n";
+			<< (g_settings.refuse_full_entries ? "" : " (RefuseFullEntries off)") << "; " << g_entry_unloaded_class
+			<< " left to the game (a class not loaded through that entry)\n";
+		{
+			size_t holding = 0, ever = 0;
+			for (const auto& [zone, churn] : g_zone_churn)
+			{
+				holding += churn.holding ? 1 : 0;
+				ever += churn.holds > 0 ? 1 : 0;
+			}
+			out << "Churning zones (spawns over a limit, removed on arrival): " << holding << " held back now, " << ever
+				<< " since reload, " << g_churn_held_calls << " spawn passes skipped\n";
+			size_t shown = 0;
+			for (const auto& [zone, churn] : g_zone_churn)
+			{
+				if (!churn.holding || shown >= 10)
+					continue;
+				++shown;
+				std::string names;
+				for (int c : churn.classes)
+					names += (names.empty() ? "" : ", ") + g_classes[c].info.short_name;
+				out << "  held: " << ObjectName(zone) << " (" << names << "; held " << churn.holds << " time(s); last at "
+					<< static_cast<int>(churn.x) << " " << static_cast<int>(churn.y) << " " << static_cast<int>(churn.z) << ")\n";
+			}
+		}
 		out << "Summoned (appeared outside a zone spawn): " << g_summoned.size() << " tracked, " << g_summoned_seen
 			<< " since load; zone spawn calls " << g_zone_spawn_calls
 			<< (g_zone_hook_installed ? "" : " (hook not installed)")
@@ -1658,7 +1766,8 @@ namespace
 				for (const auto& [zone, stats] : g_zone_stats)
 				{
 					if (stats.stopped && !stats.by_mesh)
-						out << "    stopped: " << ObjectName(zone) << " (" << stats.inside << " spawned into " << stats.area << ")\n";
+						out << "    stopped: " << ObjectName(zone) << " (" << stats.inside << " spawned into " << stats.area << "; last at "
+							<< static_cast<int>(stats.x) << " " << static_cast<int>(stats.y) << " " << static_cast<int>(stats.z) << ")\n";
 				}
 			}
 			if (g_rules->under_mesh.enabled)
@@ -1686,10 +1795,9 @@ namespace
 					{
 						if (stats.stopped && stats.by_mesh)
 						{
-							const FVector at = ActorLocationOf(zone);
 							out << "      stopped: " << ObjectName(zone) << " (" << stats.under << " removed, " << stats.clear
-								<< " clear; zone at " << static_cast<int>(at.X) << " " << static_cast<int>(at.Y) << " "
-								<< static_cast<int>(at.Z) << ")\n";
+								<< " clear; last at " << static_cast<int>(stats.x) << " " << static_cast<int>(stats.y) << " "
+								<< static_cast<int>(stats.z) << ")\n";
 						}
 					}
 				}

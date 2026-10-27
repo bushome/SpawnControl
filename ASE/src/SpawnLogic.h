@@ -1313,6 +1313,34 @@ namespace SpawnControl
 
 	// For the spawn hook: should a creature of this class that just appeared be queued for removal,
 	// given the counts as they stand after it was added?
+	// Churn: a zone whose spawns are almost all over a limit, and removed the moment they appear, spawns
+	// again at once to make up the loss, so the removals never end (a capped class the zone's entries can
+	// not be refused for). Such a zone is held back while the classes it churned are still full.
+	constexpr int kChurnWindow = 20;      // the zone's last spawns looked at
+	constexpr int kChurnRemoved = 18;     // ...of which this many removed on arrival makes it churn
+
+	struct ChurnWindow
+	{
+		uint32_t removed_bits = 0;  // newest spawn in bit 0; 1 = removed on arrival
+		int count = 0;              // spawns recorded, up to kChurnWindow
+
+		void Add(bool removed)
+		{
+			removed_bits = ((removed_bits << 1) | (removed ? 1u : 0u)) & ((1u << kChurnWindow) - 1u);
+			count = (std::min)(count + 1, kChurnWindow);
+		}
+
+		int Removed() const
+		{
+			int n = 0;
+			for (uint32_t bits = removed_bits; bits != 0; bits &= bits - 1)
+				++n;
+			return n;
+		}
+
+		bool Churning() const { return count >= kChurnWindow && Removed() >= kChurnRemoved; }
+	};
+
 	inline bool OverOnSpawn(const ClassRule& rule, int class_count, const std::vector<int>& group_counts,
 		const std::vector<GroupRule>& groups)
 	{
@@ -1677,18 +1705,48 @@ namespace SpawnControl
 			std::string origin;
 			if (!from_map)
 				origin = "default";
-			else if (defaults != nullptr && *defaults != value)
+			else if (defaults == nullptr)
+				origin = "map";
+			else if (*defaults != value)
 				origin = "map; default " + ShortDump(*defaults);
 			else
-				origin = "map";
+				origin = "map, same as default";
 			if (value.is_array() && !value.empty() && value[0].is_object())
 			{
+				const std::string list_origin = !from_map ? "default" : defaults == nullptr ? "map" : *defaults == value ? "map, same as default" : "map; replaces the default list";
 				for (size_t i = 0; i < value.size(); ++i)
-					lines.push_back(path + "[" + std::to_string(i) + "] = " + ShortDump(value[i]) + "  (" + (from_map ? "map" : "default") + ")");
+					lines.push_back(path + "[" + std::to_string(i) + "] = " + ShortDump(value[i]) + "  (" + list_origin + ")");
 				return;
 			}
 			lines.push_back(path + " = " + ShortDump(value) + "  (" + origin + ")");
 		}
+	}
+
+	// The files a load read, short: one file as is; several as their folder and names, map files counted.
+	inline std::string SummarizeSources(const std::vector<std::string>& sources)
+	{
+		if (sources.empty())
+			return "?";
+		if (sources.size() == 1)
+			return sources[0];
+		const size_t cut = sources[0].find_last_of("\\/");
+		const std::string folder = cut == std::string::npos ? std::string() : sources[0].substr(0, cut);
+		std::vector<std::string> named;
+		size_t maps = 0;
+		for (const std::string& source : sources)
+		{
+			const size_t at = source.find_last_of("\\/");
+			const std::string name = at == std::string::npos ? source : source.substr(at + 1);
+			if (EqualsNoCase(name, "config.json") || EqualsNoCase(name, "Default.json"))
+				named.push_back(name);
+			else
+				++maps;
+		}
+		std::string text = folder + " (";
+		for (const std::string& name : named)
+			text += name + ", ";
+		text += std::to_string(maps) + " map file" + (maps == 1 ? "" : "s") + ")";
+		return text;
 	}
 
 	// One line per value: "Limit.Dodo_Character_BP_C = 300  (map; default 250)". A section used only

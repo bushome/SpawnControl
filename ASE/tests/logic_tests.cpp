@@ -827,6 +827,39 @@ static void TestMeshZoneStop()
 	CHECK(bad.maps[0].under_mesh.stop_zones && AnyContains(bad.warnings, "StopZones must be true or false; using true"));
 }
 
+static void TestChurnAndSources()
+{
+	ChurnWindow window;
+	for (int i = 0; i < kChurnWindow - 1; ++i)
+		window.Add(true);
+	CHECK(!window.Churning());               // not a full window yet
+	window.Add(true);
+	CHECK(window.Churning() && window.Removed() == kChurnWindow);
+	window.Add(false);
+	window.Add(false);
+	CHECK(window.Churning() && window.Removed() == kChurnWindow - 2);   // 18 of the last 20
+	window.Add(false);
+	CHECK(!window.Churning());               // 17 of 20: a zone that mostly spawns other things keeps going
+	for (int i = 0; i < kChurnWindow; ++i)
+		window.Add(i % 2 == 0);
+	CHECK(!window.Churning() && window.Removed() == kChurnWindow / 2 && window.count == kChurnWindow);
+
+	CHECK(SummarizeSources({ "D:\\a\\config.json" }) == "D:\\a\\config.json");
+	CHECK(SummarizeSources({ "D:\\s\\config.json", "D:\\s\\Aberration.json", "D:\\s\\Default.json", "D:\\s\\Island.json" }) ==
+		"D:\\s (config.json, Default.json, 2 map files)");
+	CHECK(SummarizeSources({ "/srv/s/Center.json", "/srv/s/Island.json" }) == "/srv/s (2 map files)");
+
+	const Settings same = ParseConfigText(R"({
+		"Default": { "Overlap": { "Fraction": 0.5, "Exclude": [ "A_C" ] }, "BlockAreas": [ { "Name": "x", "Location": [ 1, 2 ], "RadiusInFoundations": 1 } ] },
+		"Maps": { "M": { "Overlap": { "Fraction": 0.5, "Exclude": [ "B_C" ] },
+			"BlockAreas": [ { "Name": "y", "Location": [ 1, 2 ], "RadiusInFoundations": 1 } ] } }
+	})");
+	const std::vector<std::string> lines = DescribeRules(same.maps[0]);
+	CHECK(HasLine(lines, "Overlap.Fraction = 0.5  (map, same as default)"));
+	CHECK(HasLine(lines, "Overlap.Exclude = [\"B_C\"]  (map; default [\"A_C\"])"));
+	CHECK(AnyContains(lines, "BlockAreas[0] = ") && AnyContains(lines, "(map; replaces the default list)"));
+}
+
 static void TestConfigFile(const std::string& path, bool shipped_expectations)
 {
 	std::ifstream file(path);
@@ -899,6 +932,7 @@ int main(int argc, char** argv)
 	TestDefaultSection();
 	TestSharedConfig();
 	TestMeshZoneStop();
+	TestChurnAndSources();
 
 	if (argc > 1)
 		TestConfigFile(argv[1], argc > 2 && std::string(argv[2]) == "--shipped");
