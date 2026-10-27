@@ -570,6 +570,11 @@ static void TestUnderMesh()
 	const Settings typo = Parse(R"({ "Maps": { "A": { "UnderMesh": { "ChecksPerTick": 5 } } } })");
 	CHECK(typo.warnings.size() == 1 && typo.warnings[0].find("UnderMesh.ChecksPerTick") != std::string::npos);
 
+	// RemoveNoGround: off unless set, separate from Remove.
+	CHECK(!parsed.maps[0].under_mesh.remove_no_ground);
+	const Settings fallen = Parse(R"({ "Maps": { "A": { "UnderMesh": { "RemoveNoGround": true } } } })");
+	CHECK(fallen.maps[0].under_mesh.remove_no_ground && !fallen.maps[0].under_mesh.remove && fallen.warnings.empty());
+
 	// TraceGround: off unless set, a known key, and checked for type.
 	CHECK(!parsed.maps[0].under_mesh.trace_ground);
 	const Settings tracing = Parse(R"({ "Maps": { "A": { "UnderMesh": { "TraceGround": true } }, "B": { "UnderMesh": { "TraceGround": 1 } } } })");
@@ -602,6 +607,18 @@ static void TestRepeatSpots()
 	const std::vector<RepeatSpot> left = FindRepeatSpots(points, 3000, 3, blocked, 10);
 	CHECK(left.size() == 1 && left[0].count == 3);
 	CHECK(FindRepeatSpots({}, 3000, 3, {}, 10).empty());
+
+	// Ground readings are summed per spot; untraced points add nothing.
+	CHECK(RepeatSpotGround(spots[0]).empty());
+	std::vector<RemovalPoint> traced;
+	traced.push_back({ 0, 0, 0, 0, GroundBelow::Found, 100 });
+	traced.push_back({ 50, 0, 0, 0, GroundBelow::Found, 300 });
+	traced.push_back({ 100, 0, 0, 0, GroundBelow::Found, 900 });
+	traced.push_back({ 150, 0, 0, 0, GroundBelow::None, 0 });
+	traced.push_back({ 200, 0, 0, 0, GroundBelow::NotTraced, 0 });
+	const std::vector<RepeatSpot> mixed = FindRepeatSpots(traced, 3000, 3, {}, 10);
+	CHECK(mixed.size() == 1 && mixed[0].count == 5 && mixed[0].ground_near == 2 && mixed[0].ground_far == 1 && mixed[0].ground_none == 1);
+	CHECK(RepeatSpotGround(mixed[0]) == "ground below: 2 within 1 fdn, 1 farther, 1 none");
 }
 
 static void TestOverOnSpawn()

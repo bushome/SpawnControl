@@ -284,6 +284,7 @@ namespace
 	std::unordered_map<uint64_t, uint32_t> g_mesh_first_below; // creature -> census it was first found below in
 	uint64_t g_mesh_removal_queued = 0;                 // creatures (and their followers) queued for removal
 	std::deque<RemovalPoint> g_mesh_removal_points;     // where under-mesh removals happened, newest last
+	std::deque<RemovalPoint> g_mesh_suspect_points;     // where suspects were found (not overlapping), newest last
 	constexpr size_t kRemovalPointsKept = 1500;
 	constexpr uint32_t kMeshStrikeCensuses = 30;          // a first "below" is kept this many censuses for its second
 	constexpr double kRepeatSpotReach = 10 * kFoundation;
@@ -1495,8 +1496,10 @@ namespace
 				continue; // asleep in stasis: tested when a later census finds it awake
 			const uint64_t key = WeakKey(candidate.creature);
 			const bool removing = g_rules->under_mesh.remove;
-			if (g_mesh_reported.count(key) > 0 && !removing)
-				continue; // reported once is enough when nothing is removed; with Remove it is tested again to confirm
+			// RemoveNoGround without Remove: only creatures with no ground under them are removed.
+			const bool removing_fallen = !removing && g_rules->under_mesh.remove_no_ground;
+			if (g_mesh_reported.count(key) > 0 && !removing && !removing_fallen)
+				continue; // reported once is enough when nothing is removed; otherwise it is tested again to confirm
 			FVector location = ActorLocation(dino);
 
 			FVector hit_location(0, 0, 0);
@@ -1512,14 +1515,20 @@ namespace
 			++g_mesh_checks;
 			--budget;
 
+			GroundBelow ground = GroundBelow::NotTraced;
+			double ground_below = 0;
+			if (under && !overlapping && (removing_fallen || g_rules->under_mesh.trace_ground))
+				ground = TraceGroundBelow(dino, location, ground_below);
+
 			bool confirmed = false;
-			if (removing)
+			if (removing || removing_fallen)
 			{
 				uint32_t first = 0;
 				const auto seen = g_mesh_first_below.find(key);
 				if (seen != g_mesh_first_below.end())
 					first = seen->second;
-				confirmed = ConfirmUnderMesh(under, overlapping, g_census_number, first);
+				const bool counts = removing ? under : under && ground == GroundBelow::None;
+				confirmed = ConfirmUnderMesh(counts, overlapping, g_census_number, first);
 				if (first == 0 || confirmed)
 					g_mesh_first_below.erase(key);
 				else
@@ -1545,9 +1554,15 @@ namespace
 			UObject* hit_object = reinterpret_cast<UObject*>(hit);
 			suspect.hit = hit_object != nullptr && hit_object->ClassField() != nullptr ? hit_object->ClassField()->NameField().ToString().ToString() : "nothing";
 			suspect.hit_above = static_cast<double>(hit_location.Z) - static_cast<double>(location.Z);
-			if (g_rules->under_mesh.trace_ground)
-				suspect.ground = TraceGroundBelow(dino, location, suspect.ground_below);
+			suspect.ground = ground;
+			suspect.ground_below = ground_below;
 			g_mesh_recent.push_front(suspect);
+			if (!overlapping)
+			{
+				g_mesh_suspect_points.push_back({ suspect.x, suspect.y, suspect.z, candidate.class_index, ground, ground_below });
+				if (g_mesh_suspect_points.size() > kRemovalPointsKept)
+					g_mesh_suspect_points.pop_front();
+			}
 			if (g_mesh_recent.size() > kMeshRecent)
 				g_mesh_recent.pop_back();
 			// While removing, the removal line says the same thing a census later.
@@ -1778,13 +1793,14 @@ namespace
 			}
 			if (g_rules->under_mesh.enabled)
 			{
-				out << "  under mesh (" << (g_rules->under_mesh.remove ? "removing: below on two censuses" : "report only")
+				out << "  under mesh (" << (g_rules->under_mesh.remove ? "removing: below on two censuses" :
+					g_rules->under_mesh.remove_no_ground ? "report only; removing those with no ground below, on two censuses" : "report only")
 					<< (g_rules->under_mesh.include_stasis ? ", stasis included" : ", awake only") << "): "
 					<< g_mesh_checks << " tested, avg "
 					<< (g_mesh_checks > 0 ? g_mesh_total_us / g_mesh_checks : 0.0) << " us, max " << g_mesh_max_us << " us, "
 					<< g_mesh_suspects << " suspects since load";
 				out << "; " << g_mesh_queue.size() << " waiting for this census";
-				if (g_rules->under_mesh.remove)
+				if (g_rules->under_mesh.remove || g_rules->under_mesh.remove_no_ground)
 					out << "; " << g_mesh_removal_queued << " queued for removal since load, " << g_mesh_first_below.size()
 						<< " found below once, waiting for a second census";
 				out << "\n";
@@ -1823,11 +1839,15 @@ namespace
 				}
 				// Spots where removals keep happening: a spawn point inside the terrain. Each comes with a BlockAreas
 				// line to paste, so the zone is stopped instead of feeding the queue.
-				const std::vector<RemovalPoint> points(g_mesh_removal_points.begin(), g_mesh_removal_points.end());
+				// Without Remove, the spots come from suspects instead: where they keep turning up.
+				const bool from_removals = g_rules->under_mesh.remove;
+				const std::deque<RemovalPoint>& source = from_removals ? g_mesh_removal_points : g_mesh_suspect_points;
+				const std::vector<RemovalPoint> points(source.begin(), source.end());
 				const std::vector<RepeatSpot> spots = FindRepeatSpots(points, kRepeatSpotReach, kRepeatSpotMinimum, g_rules->block_areas, 10);
+				const char* found = from_removals ? " removed" : " suspects";
 				if (!spots.empty())
 				{
-					out << "    repeat spots (" << kRepeatSpotMinimum << "+ removals within " << static_cast<int>(kRepeatSpotReach / kFoundation)
+					out << "    repeat spots (" << kRepeatSpotMinimum << "+" << found << " within " << static_cast<int>(kRepeatSpotReach / kFoundation)
 						<< " foundations, not yet in a block area); check each, then paste into BlockAreas:\n";
 					for (size_t i = 0; i < spots.size(); ++i)
 					{
@@ -1841,7 +1861,8 @@ namespace
 						}
 						const std::string first_class = !spot.classes.empty() && spot.classes[0].second >= 0 &&
 							static_cast<size_t>(spot.classes[0].second) < g_classes.size() ? g_classes[spot.classes[0].second].info.short_name : "spot";
-						out << "      " << spot.count << " removed (" << classes << "):\n"
+						const std::string ground_text = RepeatSpotGround(spot);
+						out << "      " << spot.count << found << " (" << classes << (ground_text.empty() ? "" : "; " + ground_text) << "):\n"
 							<< "        { \"Name\": \"Repeat " << (i + 1) << " " << first_class << "\", \"Location\": [ "
 							<< static_cast<int>(spot.x) << ", " << static_cast<int>(spot.y) << ", " << static_cast<int>(spot.z)
 							<< " ], \"RadiusInFoundations\": " << spot.radius_foundations << " }\n";

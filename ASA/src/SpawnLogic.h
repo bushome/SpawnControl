@@ -184,6 +184,7 @@ namespace SpawnControl
 		bool include_stasis = false;       // also test creatures in stasis, far from any player
 		bool stop_zones = true;            // with remove: stop a zone whose spawns end up under the mesh
 		bool trace_ground = false;         // trace down from each suspect and report how far below the ground is
+		bool remove_no_ground = false;     // without Remove: still remove creatures below with no ground under them
 		std::vector<std::string> exclude;
 	};
 
@@ -538,7 +539,7 @@ namespace SpawnControl
 			{
 				const nlohmann::json& under = section["UnderMesh"];
 				if (!under.is_object())
-					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, IncludeStasis, StopZones, TraceGround and Exclude; ignored");
+					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, RemoveNoGround, IncludeStasis, StopZones, TraceGround and Exclude; ignored");
 				else
 				{
 					rules.under_mesh.enabled = true;
@@ -550,7 +551,8 @@ namespace SpawnControl
 					for (const auto& [key, target] : { std::pair<const char*, bool*>{ "Remove", &rules.under_mesh.remove },
 							std::pair<const char*, bool*>{ "IncludeStasis", &rules.under_mesh.include_stasis },
 							std::pair<const char*, bool*>{ "StopZones", &rules.under_mesh.stop_zones },
-							std::pair<const char*, bool*>{ "TraceGround", &rules.under_mesh.trace_ground } })
+							std::pair<const char*, bool*>{ "TraceGround", &rules.under_mesh.trace_ground },
+							std::pair<const char*, bool*>{ "RemoveNoGround", &rules.under_mesh.remove_no_ground } })
 					{
 						if (!under.contains(key))
 							continue;
@@ -636,7 +638,7 @@ namespace SpawnControl
 			if (map.contains("Overlap"))
 				WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
 			if (map.contains("UnderMesh"))
-				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "IncludeStasis", "StopZones", "TraceGround", "Exclude" }, where + "UnderMesh.", warnings);
+				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "RemoveNoGround", "IncludeStasis", "StopZones", "TraceGround", "Exclude" }, where + "UnderMesh.", warnings);
 		}
 
 		inline void WarnUnknownKeys(const nlohmann::json& root, std::vector<std::string>& warnings)
@@ -1793,14 +1795,19 @@ namespace SpawnControl
 	}
 
 	// ------------------------------------------------------------------------------------------
-	// Repeat spots: where under-mesh removals keep happening, so a block area can stop the source
+	// Repeat spots: where under-mesh removals (or, without Remove, suspects) keep turning up, so a block area
+	// can stop the source
 	// ------------------------------------------------------------------------------------------
 
 	struct RemovalPoint
 	{
 		double x = 0, y = 0, z = 0;
 		int class_index = -1;
+		GroundBelow ground = GroundBelow::NotTraced;
+		double ground_below = 0;                    // units, when ground is Found
 	};
+
+	constexpr double kGroundNear = kFoundation; // ground this close below: standing on something
 
 	struct RepeatSpot
 	{
@@ -1808,7 +1815,29 @@ namespace SpawnControl
 		double x = 0, y = 0, z = 0;                 // average position
 		int radius_foundations = 0;                 // covers every removal in the spot, with a margin
 		std::vector<std::pair<int, int>> classes;   // (count, class index), largest first
+		int ground_near = 0;                        // points with ground within kGroundNear below
+		int ground_far = 0;                         // points with ground farther below
+		int ground_none = 0;                        // points with no ground within kGroundTraceReach
 	};
+
+	// "ground below: 5 within 1 fdn, 2 farther, 1 none", or empty when nothing in the spot was traced.
+	inline std::string RepeatSpotGround(const RepeatSpot& spot)
+	{
+		if (spot.ground_near + spot.ground_far + spot.ground_none == 0)
+			return {};
+		std::string out = "ground below: ";
+		bool first = true;
+		const auto add = [&](int n, const std::string& what) {
+			if (n == 0)
+				return;
+			out += (first ? "" : ", ") + std::to_string(n) + " " + what;
+			first = false;
+		};
+		add(spot.ground_near, "within " + std::to_string(static_cast<int>(kGroundNear / kFoundation)) + " fdn");
+		add(spot.ground_far, "farther");
+		add(spot.ground_none, "none");
+		return out;
+	}
 
 	// Groups removals that lie within `reach` of a seed removal (3D), largest groups first; a group needs at
 	// least `min_count`. Each removal belongs to one group. Groups whose centre already lies in a block area
@@ -1856,6 +1885,10 @@ namespace SpawnControl
 				spot.y += points[m].y / best_members.size();
 				spot.z += points[m].z / best_members.size();
 				++by_class[points[m].class_index];
+				if (points[m].ground == GroundBelow::None)
+					++spot.ground_none;
+				else if (points[m].ground == GroundBelow::Found)
+					++(points[m].ground_below <= kGroundNear ? spot.ground_near : spot.ground_far);
 			}
 			double farthest = 0;
 			for (size_t m : best_members)
