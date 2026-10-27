@@ -246,6 +246,10 @@ namespace
 	uint32_t g_census_number = 0;                       // finished censuses since load
 	std::unordered_map<uint64_t, uint32_t> g_mesh_first_below; // creature -> census it was first found below in
 	uint64_t g_mesh_removal_queued = 0;                 // creatures (and their followers) queued for removal
+	std::deque<RemovalPoint> g_mesh_removal_points;     // where under-mesh removals happened, newest last
+	constexpr size_t kRemovalPointsKept = 1500;
+	constexpr double kRepeatSpotReach = 10 * kFoundation;
+	constexpr int kRepeatSpotMinimum = 3;
 	uint64_t g_stopped_zone_refusals = 0;
 	uint64_t g_block_area_queued = 0;                   // creatures queued for being inside a block area
 	uint64_t g_summoned_seen = 0;                       // creatures marked summoned since load
@@ -1266,6 +1270,9 @@ namespace
 		if (queued == 0)
 			return;
 		g_mesh_removal_queued += queued;
+		g_mesh_removal_points.push_back({ static_cast<double>(location.X), static_cast<double>(location.Y), static_cast<double>(location.Z), class_index });
+		if (g_mesh_removal_points.size() > kRemovalPointsKept)
+			g_mesh_removal_points.pop_front();
 		Log::GetLog()->info("Under mesh: removing {} at {:.0f} {:.0f} {:.0f} (below on two censuses){}", g_classes[class_index].info.short_name,
 			static_cast<double>(location.X), static_cast<double>(location.Y), static_cast<double>(location.Z),
 			queued > 1 ? " with " + std::to_string(queued - 1) + " follower(s)" : std::string());
@@ -1570,6 +1577,32 @@ namespace
 							<< (c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"));
 					}
 					out << (by_class.size() > 10 ? ", ...\n" : "\n");
+				}
+				// Spots where removals keep happening: a spawn point inside the terrain. Each comes with a BlockAreas
+				// line to paste, so the zone is stopped instead of feeding the queue.
+				const std::vector<RemovalPoint> points(g_mesh_removal_points.begin(), g_mesh_removal_points.end());
+				const std::vector<RepeatSpot> spots = FindRepeatSpots(points, kRepeatSpotReach, kRepeatSpotMinimum, g_rules->block_areas, 10);
+				if (!spots.empty())
+				{
+					out << "    repeat spots (" << kRepeatSpotMinimum << "+ removals within " << static_cast<int>(kRepeatSpotReach / kFoundation)
+						<< " foundations, not yet in a block area); check each, then paste into BlockAreas:\n";
+					for (size_t i = 0; i < spots.size(); ++i)
+					{
+						const RepeatSpot& spot = spots[i];
+						std::string classes;
+						for (size_t k = 0; k < spot.classes.size() && k < 3; ++k)
+						{
+							const int c = spot.classes[k].second;
+							classes += (k == 0 ? "" : ", ") + std::to_string(spot.classes[k].first) + " " +
+								(c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"));
+						}
+						const std::string first_class = !spot.classes.empty() && spot.classes[0].second >= 0 &&
+							static_cast<size_t>(spot.classes[0].second) < g_classes.size() ? g_classes[spot.classes[0].second].info.short_name : "spot";
+						out << "      " << spot.count << " removed (" << classes << "):\n"
+							<< "        { \"Name\": \"Repeat " << (i + 1) << " " << first_class << "\", \"Location\": [ "
+							<< static_cast<int>(spot.x) << ", " << static_cast<int>(spot.y) << ", " << static_cast<int>(spot.z)
+							<< " ], \"RadiusInFoundations\": " << spot.radius_foundations << " }\n";
+					}
 				}
 				for (const MeshSuspect& suspect : g_mesh_recent)
 				{

@@ -1407,4 +1407,87 @@ namespace SpawnControl
 		settings.warnings.insert(settings.warnings.begin(), comma_warnings.begin(), comma_warnings.end());
 		return settings;
 	}
+
+	// ------------------------------------------------------------------------------------------
+	// Repeat spots: where under-mesh removals keep happening, so a block area can stop the source
+	// ------------------------------------------------------------------------------------------
+
+	struct RemovalPoint
+	{
+		double x = 0, y = 0, z = 0;
+		int class_index = -1;
+	};
+
+	struct RepeatSpot
+	{
+		int count = 0;
+		double x = 0, y = 0, z = 0;                 // average position
+		int radius_foundations = 0;                 // covers every removal in the spot, with a margin
+		std::vector<std::pair<int, int>> classes;   // (count, class index), largest first
+	};
+
+	// Groups removals that lie within `reach` of a seed removal (3D), largest groups first; a group needs at
+	// least `min_count`. Each removal belongs to one group. Groups whose centre already lies in a block area
+	// are left out. O(n^2) in the points, run only for List, with the caller keeping n bounded.
+	inline std::vector<RepeatSpot> FindRepeatSpots(const std::vector<RemovalPoint>& points, double reach, int min_count,
+		const std::vector<BlockArea>& existing, size_t max_spots)
+	{
+		std::vector<RepeatSpot> spots;
+		std::vector<bool> used(points.size(), false);
+		const double reach_squared = reach * reach;
+		for (;;)
+		{
+			// The point with the most unused neighbours seeds the next group.
+			size_t best = points.size();
+			std::vector<size_t> best_members;
+			for (size_t i = 0; i < points.size(); ++i)
+			{
+				if (used[i])
+					continue;
+				std::vector<size_t> members;
+				for (size_t j = 0; j < points.size(); ++j)
+				{
+					if (used[j])
+						continue;
+					const double dx = points[i].x - points[j].x, dy = points[i].y - points[j].y, dz = points[i].z - points[j].z;
+					if (dx * dx + dy * dy + dz * dz <= reach_squared)
+						members.push_back(j);
+				}
+				if (members.size() > best_members.size())
+				{
+					best = i;
+					best_members = std::move(members);
+				}
+			}
+			if (best == points.size() || static_cast<int>(best_members.size()) < min_count)
+				break;
+
+			RepeatSpot spot;
+			spot.count = static_cast<int>(best_members.size());
+			std::map<int, int> by_class;
+			for (size_t m : best_members)
+			{
+				used[m] = true;
+				spot.x += points[m].x / best_members.size();
+				spot.y += points[m].y / best_members.size();
+				spot.z += points[m].z / best_members.size();
+				++by_class[points[m].class_index];
+			}
+			double farthest = 0;
+			for (size_t m : best_members)
+			{
+				const double dx = points[m].x - spot.x, dy = points[m].y - spot.y, dz = points[m].z - spot.z;
+				farthest = (std::max)(farthest, std::sqrt(dx * dx + dy * dy + dz * dz));
+			}
+			spot.radius_foundations = (std::max)(5, static_cast<int>(std::ceil((farthest + 2 * kFoundation) / kFoundation)));
+			for (const auto& [c, n] : by_class)
+				spot.classes.emplace_back(n, c);
+			std::sort(spot.classes.rbegin(), spot.classes.rend());
+			if (BlockAreaAt(existing, spot.x, spot.y, spot.z) < 0)
+				spots.push_back(std::move(spot));
+			if (spots.size() >= max_spots)
+				break;
+		}
+		return spots;
+	}
 }

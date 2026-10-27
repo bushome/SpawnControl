@@ -570,6 +570,27 @@ static void TestUnderMesh()
 	CHECK(typo.warnings.size() == 1 && typo.warnings[0].find("UnderMesh.ChecksPerTick") != std::string::npos);
 }
 
+static void TestRepeatSpots()
+{
+	std::vector<RemovalPoint> points;
+	for (int i = 0; i < 5; ++i) points.push_back({ 1000.0 + i * 100, 2000, -500, 0 });   // a spot of 5, class 0
+	points.push_back({ 1200, 2100, -500, 1 });                                            // and one of class 1 in it
+	for (int i = 0; i < 3; ++i) points.push_back({ 90000.0 + i * 50, 0, 0, 2 });           // a spot of 3
+	points.push_back({ 50000, 50000, 0, 3 }); points.push_back({ 51000, 50000, 0, 3 });    // only 2: not a spot
+	const std::vector<RepeatSpot> spots = FindRepeatSpots(points, 3000, 3, {}, 10);
+	CHECK(spots.size() == 2);
+	CHECK(spots[0].count == 6 && spots[0].classes[0].first == 5 && spots[0].classes[0].second == 0);
+	CHECK(std::abs(spots[0].x - 1200) < 1 && spots[0].radius_foundations >= 5);
+	CHECK(spots[1].count == 3);
+
+	// A spot already inside a block area is not suggested again.
+	std::vector<BlockArea> blocked(1);
+	blocked[0].x = 1200; blocked[0].y = 2000; blocked[0].z = -500; blocked[0].has_z = true; blocked[0].radius = 5000;
+	const std::vector<RepeatSpot> left = FindRepeatSpots(points, 3000, 3, blocked, 10);
+	CHECK(left.size() == 1 && left[0].count == 3);
+	CHECK(FindRepeatSpots({}, 3000, 3, {}, 10).empty());
+}
+
 static void TestOverOnSpawn()
 {
 	std::vector<GroupRule> groups(1);
@@ -703,6 +724,7 @@ int main(int argc, char** argv)
 	TestOverlap();
 	TestConfigChecks();
 	TestUnderMesh();
+	TestRepeatSpots();
 	TestOverOnSpawn();
 	TestIsFull();
 	TestRefresh();
