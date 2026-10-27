@@ -237,6 +237,7 @@ namespace
 	std::unordered_set<uint64_t> g_mesh_reported;
 	uint64_t g_mesh_checks = 0;
 	uint64_t g_mesh_suspects = 0;
+	std::unordered_map<int, uint32_t> g_mesh_suspects_by_class;   // class index -> suspects since load
 	uint64_t g_mesh_in_exclusion_zone = 0;
 	double g_mesh_total_us = 0;
 	double g_mesh_max_us = 0;
@@ -1323,6 +1324,7 @@ namespace
 				continue;
 
 			++g_mesh_suspects;
+			++g_mesh_suspects_by_class[candidate.class_index];
 			MeshSuspect suspect;
 			suspect.class_index = candidate.class_index;
 			suspect.x = static_cast<double>(location.X);
@@ -1548,6 +1550,21 @@ namespace
 					out << "; " << g_mesh_removal_queued << " queued for removal since load, " << g_mesh_first_below.size()
 						<< " found below once, waiting for a second census";
 				out << "\n";
+				if (!g_mesh_suspects_by_class.empty())
+				{
+					std::vector<std::pair<uint32_t, int>> by_class;
+					for (const auto& [c, n] : g_mesh_suspects_by_class)
+						by_class.emplace_back(n, c);
+					std::sort(by_class.rbegin(), by_class.rend());
+					out << "    suspects by class:";
+					for (size_t i = 0; i < by_class.size() && i < 10; ++i)
+					{
+						const int c = by_class[i].second;
+						out << (i == 0 ? " " : ", ") << by_class[i].first << " "
+							<< (c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : std::string("?"));
+					}
+					out << (by_class.size() > 10 ? ", ...\n" : "\n");
+				}
 				for (const MeshSuspect& suspect : g_mesh_recent)
 				{
 					const int c = suspect.class_index;
