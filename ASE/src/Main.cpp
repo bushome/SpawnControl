@@ -252,6 +252,7 @@ namespace
 	uint64_t g_mesh_removal_queued = 0;                 // creatures (and their followers) queued for removal
 	std::deque<RemovalPoint> g_mesh_removal_points;     // where under-mesh removals happened, newest last
 	constexpr size_t kRemovalPointsKept = 1500;
+	constexpr uint32_t kMeshStrikeCensuses = 30;          // a first "below" is kept this many censuses for its second
 	constexpr double kRepeatSpotReach = 10 * kFoundation;
 	constexpr int kRepeatSpotMinimum = 3;
 	uint64_t g_stopped_zone_refusals = 0;
@@ -942,7 +943,9 @@ namespace
 
 		++g_census_number;
 		for (auto it = g_mesh_first_below.begin(); it != g_mesh_first_below.end();)
-			it = it->second + 3 < g_census_number ? g_mesh_first_below.erase(it) : std::next(it); // not seen again for a while
+			// Forgotten only after many censuses: on a map where tests are expensive (Aberration: ~260 us each) a low
+			// ChecksPerSecond reaches each creature only every several censuses, and the second strike must still count.
+			it = it->second + kMeshStrikeCensuses < g_census_number ? g_mesh_first_below.erase(it) : std::next(it);
 		g_mesh_queue.clear();
 		if (g_rules != nullptr && g_rules->under_mesh.enabled)
 		{
