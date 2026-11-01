@@ -32,6 +32,8 @@
 #include <iterator>
 #include <random>
 #include <map>
+#include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -52,6 +54,7 @@ namespace
 	const char* const kCmdReload = "SpawnControl.Reload";
 	const char* const kCmdList = "SpawnControl.List";
 	const char* const kCmdMeshHere = "SpawnControl.MeshHere";
+	const char* const kCmdZones = "SpawnControl.Zones";
 	const char* const kCmdLinks = "SpawnControl.Links";
 	const char* const kCmdRules = "SpawnControl.Rules";
 	const char* const kTimerId = "SpawnControl.Timer";
@@ -207,6 +210,13 @@ namespace
 	int g_zone_spawn_depth = 0;                         // > 0 while a zone is spawning its creatures
 	uint64_t g_zone_spawn_calls = 0;
 	ANPCZoneManager* g_current_zone = nullptr;          // the zone whose SpawnNPCs is running
+	// Per zone, for the Zones command: SpawnNPCs passes since load, and how many of them returned true.
+	struct ZoneCalls
+	{
+		uint64_t calls = 0;
+		uint64_t returned_true = 0;
+	};
+	std::unordered_map<ANPCZoneManager*, ZoneCalls> g_zone_calls;
 
 	struct ZoneStats
 	{
@@ -1597,6 +1607,10 @@ namespace
 		const bool result = ANPCZoneManager_SpawnNPCs_original(_this);
 		g_current_zone = outer_zone;
 		--g_zone_spawn_depth;
+		ZoneCalls& calls = g_zone_calls[_this];
+		++calls.calls;
+		if (result)
+			++calls.returned_true;
 		return result;
 	}
 
@@ -2397,6 +2411,191 @@ namespace
 		return out.str();
 	}
 
+	// Zones: the spawn zones around the admin and what each is doing, for zones that spawn too little.
+	// Zone managers have no useful location of their own, so distance is to their spawn and zone volumes.
+	template <typename T>
+	T& ZoneField(ANPCZoneManager* zone, const char* name)
+	{
+		return *GetNativePointerField<T*>(zone, (std::string("ANPCZoneManager.") + name).c_str());
+	}
+
+	bool IsZoneManager(AActor* actor, std::unordered_map<UClass*, bool>& known)
+	{
+		UClass* cls = reinterpret_cast<UObject*>(actor)->ClassField();
+		if (cls == nullptr)
+			return false;
+		const auto found = known.find(cls);
+		if (found != known.end())
+			return found->second;
+		bool is_zone = false;
+		int depth = 0;
+		for (UStruct* current = cls; current != nullptr && depth < 32 && !is_zone; current = current->SuperStructField(), ++depth)
+			is_zone = current->NameField().ToString().ToString() == "NPCZoneManager";
+		known.emplace(cls, is_zone);
+		return is_zone;
+	}
+
+	// Distance from a point to an actor's bounding box (0 inside), and the box's size.
+	double DistanceToBounds(AActor* actor, const FVector& at, FVector& size)
+	{
+		FVector origin{}, extent{};
+		actor->GetActorBounds(false, &origin, &extent, false);
+		size = FVector(extent.X * 2, extent.Y * 2, extent.Z * 2);
+		const double dx = (std::max)(0.0, std::abs(at.X - origin.X) - extent.X);
+		const double dy = (std::max)(0.0, std::abs(at.Y - origin.Y) - extent.Y);
+		const double dz = (std::max)(0.0, std::abs(at.Z - origin.Z) - extent.Z);
+		return std::sqrt(dx * dx + dy * dy + dz * dz);
+	}
+
+	std::string ZonesHereText(const FVector& at, int radius_foundations)
+	{
+		UWorld* world = World();
+		if (world == nullptr)
+			return "No world.\n";
+		const double radius = radius_foundations * kFoundation;
+		const auto fdn = [](double units) { std::ostringstream o; o << std::fixed << std::setprecision(1) << units / kFoundation; return o.str(); };
+		const auto on = [](bool value) { return value ? "on" : "off"; };
+		struct Row
+		{
+			double distance = 0;
+			std::string text;
+		};
+		std::vector<Row> rows;
+		std::unordered_map<UClass*, bool> known;
+		size_t zones_seen = 0;
+		auto& levels = world->LevelsField();
+		for (int32 l = 0; l < levels.Num(); ++l)
+		{
+			ULevel* level = levels[l].Get();
+			if (level == nullptr)
+				continue;
+			TArray<AActor*>& actors = *GetNativePointerField<TArray<AActor*>*>(level, kLevelActorsField);
+			for (int a = 0; a < actors.Num(); ++a)
+			{
+				AActor* actor = actors[a];
+				if (actor == nullptr || !IsZoneManager(actor, known))
+					continue;
+				++zones_seen;
+				ANPCZoneManager* zone = reinterpret_cast<ANPCZoneManager*>(actor);
+
+				// Where it spawns (spawn volumes) and where it counts its creatures (zone volumes).
+				double nearest = (std::numeric_limits<double>::max)();
+				double nearest_spawn = (std::numeric_limits<double>::max)();
+				FVector biggest{};
+				auto& spawn_volumes = ZoneField<TArray<FLinkedZoneSpawnVolumeEntry>>(zone, "LinkedZoneSpawnVolumeEntries");
+				int spawn_count = 0;
+				for (int v = 0; v < spawn_volumes.Num() && v < 64; ++v)
+				{
+					AActor* volume = reinterpret_cast<AActor*>(spawn_volumes[v].LinkedZoneSpawnVolume);
+					if (volume == nullptr)
+						continue;
+					++spawn_count;
+					FVector size{};
+					const double d = DistanceToBounds(volume, at, size);
+					nearest_spawn = (std::min)(nearest_spawn, d);
+					if (size.X * size.Y * size.Z > biggest.X * biggest.Y * biggest.Z)
+						biggest = size;
+				}
+				auto& zone_volumes = ZoneField<TArray<AActor*>>(zone, "LinkedZoneVolumes");
+				int zone_count = 0;
+				double nearest_zone = (std::numeric_limits<double>::max)();
+				for (int v = 0; v < zone_volumes.Num() && v < 64; ++v)
+				{
+					if (zone_volumes[v] == nullptr)
+						continue;
+					++zone_count;
+					FVector size{};
+					nearest_zone = (std::min)(nearest_zone, DistanceToBounds(zone_volumes[v], at, size));
+				}
+				nearest = (std::min)(nearest_spawn, nearest_zone);
+				if (nearest > radius)
+					continue;
+
+				std::ostringstream out;
+				const bool enabled = ZoneField<bool>(zone, "bEnabled");
+				out << ObjectName(zone) << " (" << fdn(nearest) << " fdn away" << (enabled ? "" : "; DISABLED")
+					<< (ZoneField<bool>(zone, "bIsCaveManager") ? "; cave manager" : "") << (ZoneField<bool>(zone, "bUsesManualSpawning") ? "; manual spawning" : "")
+					<< ")\n";
+				out << "    live " << ZoneField<int>(zone, "NumNPCSpawned") << " of target " << ZoneField<int>(zone, "UseDesiredNumberOfNPC")
+					<< " (MinDesired " << ZoneField<int>(zone, "MinDesiredNumberOfNPC") << ", Max " << ZoneField<int>(zone, "MaxNumberOfNPC")
+					<< ", multiplier " << ZoneField<float>(zone, "DesiredNumberOfNPCMultiplier") << "); spawn failures "
+					<< ZoneField<int>(zone, "NumSpawnFailures") << (ZoneField<bool>(zone, "bPrintedFailureToSpawnMessage") ? " (game logged a failure to spawn)" : "")
+					<< "\n";
+
+				const auto calls = g_zone_calls.find(zone);
+				const auto churn = g_zone_churn.find(zone);
+				const auto stats = g_zone_stats.find(zone);
+				out << "    SpawnControl: " << (calls != g_zone_calls.end() ? calls->second.calls : 0) << " spawn passes since load ("
+					<< (calls != g_zone_calls.end() ? calls->second.returned_true : 0) << " returned true), "
+					<< (churn != g_zone_churn.end() ? churn->second.spawned : 0) << " creatures arrived ("
+					<< (churn != g_zone_churn.end() ? churn->second.removed : 0) << " removed for limits)"
+					<< (churn != g_zone_churn.end() && churn->second.holding ? "; HELD for churn" : "")
+					<< (stats != g_zone_stats.end() && stats->second.stopped ? std::string("; STOPPED (") + (stats->second.by_mesh ? "under the mesh" : stats->second.area) + ")" : "")
+					<< "\n";
+
+				out << "    spawn volumes " << spawn_count;
+				if (spawn_count > 0)
+					out << " (nearest " << fdn(nearest_spawn) << " fdn; largest " << fdn(biggest.X) << " x " << fdn(biggest.Y) << " x " << fdn(biggest.Z) << " fdn)";
+				out << ", zone volumes " << zone_count << ", spawn point overrides " << ZoneField<TArray<AActor*>>(zone, "SpawnPointOverrides").Num() << "\n";
+				out << "    placement: " << ZoneField<int>(zone, "MaxNumberSpawnZoneRandomPointChecks") << " random point checks; extent test "
+					<< on(ZoneField<bool>(zone, "bAllowExtentTest")) << ", overlap check " << on(ZoneField<bool>(zone, "bUseSpawnOverlapCheck"))
+					<< ", blocking check " << on(ZoneField<bool>(zone, "bUseSpawnBlockingCheck")) << ", pawn blocking " << on(ZoneField<bool>(zone, "bUseSpawnPawnBlockingCheck"))
+					<< ", trace for points " << on(ZoneField<bool>(zone, "bTraceForSpawnPoints"))
+					<< (ZoneField<bool>(zone, "bNeverSpawnInWater") ? ", never in water" : "") << (ZoneField<bool>(zone, "bOnlySpawnInWater") ? ", only in water" : "")
+					<< "; min distance from players " << fdn(ZoneField<float>(zone, "TheMinimumPlayerDistanceFromSpawnPoint")) << " fdn, structures "
+					<< fdn(ZoneField<float>(zone, "TheMinimumStructureDistanceFromSpawnPoint")) << " fdn, tames "
+					<< fdn(ZoneField<float>(zone, "TheMinimumTamedDinoDistanceFromSpawnPoint")) << " fdn\n";
+
+				TArray<FNPCSpawnEntry>& entries = zone->NPCSpawnEntriesField();
+				out << "    entries " << entries.Num() << ":";
+				for (int e = 0; e < entries.Num() && e < 12; ++e)
+				{
+					FNPCSpawnEntry& entry = entries[e];
+					std::string classes;
+					for (int c = 0; c < entry.NPCsToSpawn.Num() && c < 4; ++c)
+					{
+						UObject* loaded = reinterpret_cast<FWeakObjectPtr*>(&entry.NPCsToSpawn[c])->Get(false);
+						classes += (c == 0 ? "" : ", ") + (loaded != nullptr ? loaded->NameField().ToString().ToString() : std::string("(not loaded)"));
+					}
+					if (entry.NPCsToSpawn.Num() > 4)
+						classes += ", ...";
+					out << (e == 0 ? " " : "; ") << "\"" << entry.AnEntryName.ToString() << "\" w" << entry.EntryWeight << " [" << classes << "]";
+				}
+				out << (entries.Num() > 12 ? "; ..." : "") << "\n";
+				rows.push_back({ nearest, out.str() });
+			}
+		}
+		std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.distance < b.distance; });
+		std::ostringstream text;
+		text << "Spawn zones within " << radius_foundations << " foundations of " << static_cast<int>(at.X) << " " << static_cast<int>(at.Y) << " "
+			<< static_cast<int>(at.Z) << ": " << rows.size() << " of " << zones_seen << " zones on the map" << (rows.size() > 10 ? " (nearest 10 shown)" : "") << "\n";
+		for (size_t i = 0; i < rows.size() && i < 10; ++i)
+			text << rows[i].text;
+		return text.str();
+	}
+
+	void ConsoleZones(APlayerController* controller, FString* command, bool)
+	{
+		if (AShooterPlayerController* admin = AdminFrom(controller))
+		{
+			int radius = 30;
+			const std::string argument = CommandArgument(command);
+			if (!argument.empty())
+			{
+				try
+				{
+					radius = (std::max)(1, (std::min)(std::stoi(argument), 300));
+				}
+				catch (const std::exception&)
+				{
+				}
+			}
+			const std::string text = ZonesHereText(AsaApi::IApiUtils::GetPosition(admin), radius);
+			Log::GetLog()->info("Zones:\n{}", text);
+			SendAdmin(admin, text);
+		}
+	}
+
 	void ConsoleMeshHere(APlayerController* controller, FString* command, bool)
 	{
 		if (AShooterPlayerController* admin = AdminFrom(controller))
@@ -2618,6 +2817,7 @@ extern "C" __declspec(dllexport) void Plugin_Init()
 	AsaApi::GetCommands().AddConsoleCommand(kCmdReload, &ConsoleReload);
 	AsaApi::GetCommands().AddConsoleCommand(kCmdList, &ConsoleList);
 	AsaApi::GetCommands().AddConsoleCommand(kCmdMeshHere, &ConsoleMeshHere);
+	AsaApi::GetCommands().AddConsoleCommand(kCmdZones, &ConsoleZones);
 	AsaApi::GetCommands().AddConsoleCommand(kCmdLinks, &ConsoleLinks);
 	AsaApi::GetCommands().AddConsoleCommand(kCmdRules, &ConsoleRules);
 	AsaApi::GetCommands().AddRconCommand(kCmdReload, &RconReload);
@@ -2634,6 +2834,7 @@ extern "C" __declspec(dllexport) void Plugin_Unload()
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdReload);
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdList);
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdMeshHere);
+	AsaApi::GetCommands().RemoveConsoleCommand(kCmdZones);
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdLinks);
 	AsaApi::GetCommands().RemoveConsoleCommand(kCmdRules);
 	AsaApi::GetCommands().RemoveRconCommand(kCmdReload);
