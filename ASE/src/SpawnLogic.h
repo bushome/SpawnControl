@@ -185,8 +185,16 @@ namespace SpawnControl
 		bool stop_zones = true;            // with remove: stop a zone whose spawns end up under the mesh
 		bool trace_ground = false;         // trace down from each suspect and report how far below the ground is
 		bool remove_no_ground = false;     // without Remove: still remove creatures below with no ground under them
+		bool ignore_foliage = true;        // a hit on foliage (trees, bushes) with ground below counts as clear
 		std::vector<std::string> exclude;
 	};
+
+	// The under-mesh test reports foliage instances (tree trunks, bushes) above a creature as the surface it is
+	// under. Those creatures stand on the ground; UnderMesh.IgnoreFoliage counts them clear when ground is below.
+	inline bool IsFoliageHit(const std::string& hit_class)
+	{
+		return hit_class.find("Foliage") != std::string::npos;
+	}
 
 	// A spawn zone whose creatures keep being removed under the mesh, while hardly any of them test clear,
 	// is spawning into the geometry: it is stopped like a zone that spawns only into a block area. Each
@@ -540,7 +548,7 @@ namespace SpawnControl
 			{
 				const nlohmann::json& under = section["UnderMesh"];
 				if (!under.is_object())
-					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, RemoveNoGround, IncludeStasis, StopZones, TraceGround and Exclude; ignored");
+					warnings.push_back(where + "UnderMesh must be an object with ChecksPerSecond, Remove, RemoveNoGround, IncludeStasis, StopZones, TraceGround, IgnoreFoliage and Exclude; ignored");
 				else
 				{
 					rules.under_mesh.enabled = true;
@@ -553,7 +561,8 @@ namespace SpawnControl
 							std::pair<const char*, bool*>{ "IncludeStasis", &rules.under_mesh.include_stasis },
 							std::pair<const char*, bool*>{ "StopZones", &rules.under_mesh.stop_zones },
 							std::pair<const char*, bool*>{ "TraceGround", &rules.under_mesh.trace_ground },
-							std::pair<const char*, bool*>{ "RemoveNoGround", &rules.under_mesh.remove_no_ground } })
+							std::pair<const char*, bool*>{ "RemoveNoGround", &rules.under_mesh.remove_no_ground },
+							std::pair<const char*, bool*>{ "IgnoreFoliage", &rules.under_mesh.ignore_foliage } })
 					{
 						if (!under.contains(key))
 							continue;
@@ -639,7 +648,7 @@ namespace SpawnControl
 			if (map.contains("Overlap"))
 				WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
 			if (map.contains("UnderMesh"))
-				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "RemoveNoGround", "IncludeStasis", "StopZones", "TraceGround", "Exclude" }, where + "UnderMesh.", warnings);
+				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "RemoveNoGround", "IncludeStasis", "StopZones", "TraceGround", "IgnoreFoliage", "Exclude" }, where + "UnderMesh.", warnings);
 		}
 
 		inline void WarnUnknownKeys(const nlohmann::json& root, std::vector<std::string>& warnings)

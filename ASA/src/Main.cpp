@@ -276,6 +276,7 @@ namespace
 	uint64_t g_mesh_suspects = 0;
 	std::unordered_map<int, uint32_t> g_mesh_suspects_by_class;   // class index -> suspects since load
 	uint64_t g_mesh_in_exclusion_zone = 0;
+	uint64_t g_mesh_foliage_clear = 0;   // foliage hits with ground below, counted clear (UnderMesh.IgnoreFoliage)
 	double g_mesh_total_us = 0;
 	double g_mesh_max_us = 0;
 	size_t g_mesh_logged_this_minute = 0;
@@ -1478,6 +1479,14 @@ namespace
 			queued > 1 ? " with " + std::to_string(queued - 1) + " follower(s)" : std::string());
 	}
 
+	// Class name of the component the under-mesh test hit, or "nothing".
+	std::string HitClassName(UActorComponent* hit)
+	{
+		UObject* object = reinterpret_cast<UObject*>(hit);
+		return object != nullptr && object->ClassField() != nullptr ? object->ClassField()->NameField().ToString().ToString() :
+			std::string("nothing");
+	}
+
 	// The first surface straight below a creature, ignoring the creature itself, up to kGroundTraceReach.
 	// The API declares FHitResult only through its field accessors, so the trace writes into a zeroed buffer
 	// far larger than the engine's own struct.
@@ -1529,7 +1538,18 @@ namespace
 			bool overlapping = false;
 			UActorComponent* hit = nullptr;
 			const auto start = Clock::now();
-			const bool under = UVictoryCore::IsUnderMesh(dino, &hit_location, &overlapping, &hit, false, 0.0f);
+			bool under = UVictoryCore::IsUnderMesh(dino, &hit_location, &overlapping, &hit, false, 0.0f);
+			// Trees and bushes above a creature standing on the ground are not the map's surface. A foliage hit
+			// with no ground below is still a creature out of the world, so it stays under.
+			if (under && g_rules->under_mesh.ignore_foliage && IsFoliageHit(HitClassName(hit)))
+			{
+				double below = 0;
+				if (TraceGroundBelow(dino, location, below) == GroundBelow::Found)
+				{
+					under = false;
+					++g_mesh_foliage_clear;
+				}
+			}
 			if (!under && !g_creature_zone.empty())
 				NoteMeshZoneClear(key);
 			const double us = std::chrono::duration<double, std::micro>(Clock::now() - start).count();
@@ -1574,8 +1594,7 @@ namespace
 			suspect.z = static_cast<double>(location.Z);
 			suspect.overlapping = overlapping;
 			suspect.in_stasis = in_stasis;
-			UObject* hit_object = reinterpret_cast<UObject*>(hit);
-			suspect.hit = hit_object != nullptr && hit_object->ClassField() != nullptr ? hit_object->ClassField()->NameField().ToString().ToString() : "nothing";
+			suspect.hit = HitClassName(hit);
 			suspect.hit_above = static_cast<double>(hit_location.Z) - static_cast<double>(location.Z);
 			suspect.ground = ground;
 			suspect.ground_below = ground_below;
@@ -1845,6 +1864,8 @@ namespace
 					<< g_mesh_checks << " tested, avg "
 					<< (g_mesh_checks > 0 ? g_mesh_total_us / g_mesh_checks : 0.0) << " us, max " << g_mesh_max_us << " us, "
 					<< g_mesh_suspects << " suspects since load";
+				if (g_rules->under_mesh.ignore_foliage)
+					out << ", " << g_mesh_foliage_clear << " foliage hits with ground below counted clear";
 				out << ", " << g_mesh_in_exclusion_zone << " skipped in the map's exclusion zones";
 				out << "; " << g_mesh_queue.size() << " waiting for this census";
 				if (g_rules->under_mesh.remove || g_rules->under_mesh.remove_no_ground)
@@ -2068,9 +2089,7 @@ namespace
 				bool overlapping = false;
 				UActorComponent* hit = nullptr;
 				const bool under = UVictoryCore::IsUnderMesh(dino, &hit_location, &overlapping, &hit, false, 0.0f);
-				UObject* hit_object = reinterpret_cast<UObject*>(hit);
-				const std::string hit_name = hit_object != nullptr && hit_object->ClassField() != nullptr ?
-					hit_object->ClassField()->NameField().ToString().ToString() : "nothing";
+				const std::string hit_name = HitClassName(hit);
 				double ground_below = 0;
 				const GroundBelow ground = TraceGroundBelow(dino, location, ground_below);
 				const std::string heights = under ?
@@ -2086,6 +2105,8 @@ namespace
 					<< kind_name << (dino->bStasised()() ? ", in stasis" : ", awake") << " -> "
 					<< (under ? (overlapping ? "UNDER (overlapping)" : "UNDER (below)") : "clear") << ", hit " << hit_name << "; " << heights
 					<< (excluded ? " [map exclusion zone]" : "")
+					<< (under && g_rules != nullptr && g_rules->under_mesh.ignore_foliage && IsFoliageHit(hit_name) &&
+						ground == GroundBelow::Found ? " [foliage with ground below: counted clear]" : "")
 					<< (g_mesh_reported.count(WeakKey(GetWeakReference(dino))) > 0 ? " [already reported]" : "");
 				rows.push_back({ distance, under, line.str() });
 				if (under)

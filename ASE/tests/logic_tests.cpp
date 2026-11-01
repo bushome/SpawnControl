@@ -581,6 +581,14 @@ static void TestUnderMesh()
 	CHECK(tracing.maps[0].under_mesh.trace_ground && !tracing.maps[1].under_mesh.trace_ground);
 	CHECK(tracing.warnings.size() == 1 && tracing.warnings[0].find("TraceGround must be true or false") != std::string::npos);
 
+	// IgnoreFoliage: on unless set false, checked for type; foliage hits recognised by class name.
+	CHECK(parsed.maps[0].under_mesh.ignore_foliage);
+	const Settings foliage = Parse(R"({ "Maps": { "A": { "UnderMesh": { "IgnoreFoliage": false } }, "B": { "UnderMesh": { "IgnoreFoliage": "no" } } } })");
+	CHECK(!foliage.maps[0].under_mesh.ignore_foliage && foliage.maps[1].under_mesh.ignore_foliage);
+	CHECK(foliage.warnings.size() == 1 && foliage.warnings[0].find("IgnoreFoliage must be true or false") != std::string::npos);
+	CHECK(IsFoliageHit("FoliageInstancedStaticMeshComponent") && IsFoliageHit("InteractiveFoliageComponent"));
+	CHECK(!IsFoliageHit("StaticMeshComponent") && !IsFoliageHit("LandscapeHeightfieldCollisionComponent") && !IsFoliageHit("nothing"));
+
 	// Heights on suspect lines, in foundations to one decimal.
 	CHECK(MeshHeights(4 * kFoundation, GroundBelow::NotTraced, 0) == "hit 4.0 fdn above");
 	CHECK(MeshHeights(1234.0, GroundBelow::Found, 75.0) == "hit 4.1 fdn above, ground 0.3 fdn below");

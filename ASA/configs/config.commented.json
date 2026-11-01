@@ -163,6 +163,9 @@
         // Also trace straight down from each suspect and report how far below the ground is (List, log).
         // Reported only; nothing removed changes.
         "TraceGround": false,
+        // A creature the test finds under foliage (a tree trunk, a bush) with ground below it counts as clear:
+        // it stands on the ground. Under foliage with no ground below still counts as under.
+        "IgnoreFoliage": true,
         "Exclude": []
       },
       "BlockAreas": [
