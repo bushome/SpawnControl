@@ -91,6 +91,7 @@ namespace
 		double x = 0, y = 0, z = 0;
 		bool in_cave = false;
 		bool in_block_area = false;
+		bool in_band = false;      // in the ASA Genesis 1 ocean band (queued only with its Remove)
 		double radius = 0;
 		bool attached = false;
 	};
@@ -292,6 +293,44 @@ namespace
 	constexpr int kRepeatSpotMinimum = 3;
 	uint64_t g_stopped_zone_refusals = 0;
 	uint64_t g_block_area_queued = 0;                   // creatures queued for being inside a block area
+
+	// ASA Genesis 1 only: the empty gap between the ocean floor and the biomes stacked under it. Nothing
+	// playable is there, so a creature in it has fallen through the ocean floor or spawned under it. Turned
+	// on by "AsaGen1OceanBand" in the GenesisSimulation section; reported only unless its "Remove" is true.
+	const char* const kOceanBandKey = "AsaGen1OceanBand";
+	const char* const kOceanBandSection = "GenesisSimulation";
+	// The ocean biome's horizontal extent; its playable floor lies flat at Z 255,156-255,284.
+	constexpr double kBandOceanMinX = -1064334.0, kBandOceanMaxX = 1165061.0;
+	constexpr double kBandOceanMinY = -1113644.0, kBandOceanMaxY = 1115730.0;
+	// The coral zone sinks deeper (lowest playable point Z 183,353), so its gap ends lower.
+	constexpr double kBandCoralMinX = -128036.0, kBandCoralMaxX = 126996.0;
+	constexpr double kBandCoralMinY = -202655.0, kBandCoralMaxY = 203305.0;
+	// Bottom of the gap: above the highest biome under the ocean (volcanic top at Z 76,843).
+	constexpr double kBandBottomZ = 80000.0;
+	constexpr double kBandTopZ = 254250.0;       // under the ocean floor
+	constexpr double kBandCoralTopZ = 182450.0;  // under the coral zone's lowest floor
+	constexpr size_t kBandRecent = 10;
+
+	struct OceanBandRule
+	{
+		bool enabled = false;
+		bool remove = false;
+	};
+	OceanBandRule g_ocean_band;
+	struct BandSpot
+	{
+		int class_index = 0;
+		double x = 0, y = 0, z = 0;
+	};
+	size_t g_band_building = 0;                                   // found by the census in progress
+	size_t g_band_last = 0;                                       // found by the last census
+	std::unordered_map<int, size_t> g_band_building_by_class;
+	std::unordered_map<int, size_t> g_band_last_by_class;
+	std::unordered_set<uint64_t> g_band_seen_building;            // creatures in the band, this census
+	std::unordered_set<uint64_t> g_band_seen;                     // ...and the last one: already logged
+	std::deque<BandSpot> g_band_recent;                           // newest first, one per creature
+	uint64_t g_band_queued = 0;                                   // queued for removal since load
+	size_t g_band_logged_this_minute = 0;
 	uint64_t g_summoned_seen = 0;                       // creatures marked summoned since load
 	std::unordered_set<uint64_t> g_summoned;            // wild creatures that appeared outside a zone spawn
 	std::unordered_set<uint64_t> g_summoned_building;   // the same, seen by the census in progress
@@ -501,6 +540,47 @@ namespace
 	// Picks the map section and re-resolves every known class against it.
 	void AdjustCounts(int class_index, int delta);
 
+	// "AsaGen1OceanBand": { "Remove": false } in the GenesisSimulation section (its own file, not Default).
+	// The shared parser does not know the key; ReloadSettings drops its unknown-key warning for map sections.
+	void ReadOceanBand()
+	{
+		const bool was_enabled = g_ocean_band.enabled, was_removing = g_ocean_band.remove;
+		g_ocean_band = OceanBandRule();
+		if (g_rules == nullptr || !g_rules->own.is_object() || !g_rules->own.contains(kOceanBandKey))
+		{
+			if (was_enabled)
+				Log::GetLog()->info("Genesis ocean band: off");
+			return;
+		}
+		if (!EqualsNoCase(g_rules->name, kOceanBandSection))
+		{
+			Log::GetLog()->warn("Config: {}.{} is only for the {} section (its coordinates are ASA Genesis 1's); ignored", g_rules->name,
+				kOceanBandKey, kOceanBandSection);
+			return;
+		}
+		const nlohmann::json& band = g_rules->own[kOceanBandKey];
+		if (!band.is_object())
+		{
+			Log::GetLog()->warn("Config: {}.{} must be an object such as {{ \"Remove\": false }}; ignored", g_rules->name, kOceanBandKey);
+			return;
+		}
+		g_ocean_band.enabled = true;
+		for (auto it = band.begin(); it != band.end(); ++it)
+		{
+			if (it.key() == "Remove")
+			{
+				if (it.value().is_boolean())
+					g_ocean_band.remove = it.value().get<bool>();
+				else
+					Log::GetLog()->warn("Config: {}.{}.Remove must be true or false; using false", g_rules->name, kOceanBandKey);
+			}
+			else
+				Log::GetLog()->warn("Config: {}.{}.{} is not a known setting here; ignored", g_rules->name, kOceanBandKey, it.key());
+		}
+		if (!was_enabled || was_removing != g_ocean_band.remove)
+			Log::GetLog()->info("Genesis ocean band: on ({})", g_ocean_band.remove ? "removing" : "report only");
+	}
+
 	void ApplyRules()
 	{
 		g_map_name = CurrentMapName();
@@ -531,6 +611,7 @@ namespace
 			g_rules = &g_settings.default_rules;
 			g_section_source += ", which has no section of its own";
 		}
+		ReadOceanBand();
 		if (g_map_known && !was_known)
 			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);
@@ -607,6 +688,11 @@ namespace
 		try
 		{
 			Settings settings = LoadSettings();
+			// The ocean band key is read here (ReadOceanBand), not by the shared parser.
+			const std::string band_warning = std::string(".") + kOceanBandKey + " is not a known setting here";
+			settings.warnings.erase(std::remove_if(settings.warnings.begin(), settings.warnings.end(),
+				[&](const std::string& warning) { return warning.rfind("Maps.", 0) == 0 && warning.find(band_warning) != std::string::npos; }),
+				settings.warnings.end());
 			for (const std::string& warning : settings.warnings)
 				Log::GetLog()->warn("Config: {}", warning);
 			g_settings = std::move(settings);
@@ -800,6 +886,39 @@ namespace
 		g_building.family_mission.assign(g_settings.report_families.size(), 0);
 	}
 
+	bool InOceanBand(const FVector& location)
+	{
+		const double x = static_cast<double>(location.X), y = static_cast<double>(location.Y), z = static_cast<double>(location.Z);
+		if (x < kBandOceanMinX || x > kBandOceanMaxX || y < kBandOceanMinY || y > kBandOceanMaxY || z <= kBandBottomZ)
+			return false;
+		const bool coral = x >= kBandCoralMinX && x <= kBandCoralMaxX && y >= kBandCoralMinY && y <= kBandCoralMaxY;
+		return z < (coral ? kBandCoralTopZ : kBandTopZ);
+	}
+
+	void NoteOceanBand(APrimalDinoCharacter* dino, int class_index, const FVector& location)
+	{
+		++g_band_building;
+		++g_band_building_by_class[class_index];
+		const uint64_t key = WeakKey(GetWeakReference(dino));
+		g_band_seen_building.insert(key);
+		if (g_band_seen.count(key) > 0)
+			return; // seen by the last census too: already listed and logged
+		BandSpot spot;
+		spot.class_index = class_index;
+		spot.x = static_cast<double>(location.X);
+		spot.y = static_cast<double>(location.Y);
+		spot.z = static_cast<double>(location.Z);
+		g_band_recent.push_front(spot);
+		if (g_band_recent.size() > kBandRecent)
+			g_band_recent.pop_back();
+		if (g_settings.log_removals && g_band_logged_this_minute < kMeshLogsPerMinute)
+		{
+			++g_band_logged_this_minute;
+			Log::GetLog()->info("Genesis ocean band: {} at {:.0f} {:.0f} {:.0f} ({})", g_classes[class_index].info.short_name, spot.x, spot.y,
+				spot.z, g_ocean_band.remove ? "queued for removal" : "report only");
+		}
+	}
+
 	void CountCreature(APrimalDinoCharacter* dino)
 	{
 		const Kind kind = Classify(dino);
@@ -852,7 +971,11 @@ namespace
 		}
 
 		const FVector location = dino->GetLocation();
-		const bool in_block_area = InBlockArea(location) >= 0;
+		const bool in_band = g_ocean_band.enabled && !rule.is_protected && InOceanBand(location);
+		if (in_band)
+			NoteOceanBand(dino, class_index, location);
+		// With its Remove, a creature in the ocean band goes like one in a block area: whatever its class.
+		const bool in_block_area = InBlockArea(location) >= 0 || (in_band && g_ocean_band.remove);
 		if ((!HasAnyRule(rule) && !in_block_area) || rule.is_protected)
 			return;
 
@@ -865,6 +988,7 @@ namespace
 		item.z = static_cast<double>(location.Z);
 		item.in_cave = dino->bWasSpawnedInACaveOrBossArea()();
 		item.in_block_area = in_block_area;
+		item.in_band = in_band && g_ocean_band.remove;
 		if (rule.overlap)
 		{
 			// The root component is the collision capsule; its bounds' horizontal extent is the radius.
@@ -920,6 +1044,12 @@ namespace
 	void FinishCensus()
 	{
 		g_census_running = false;
+		g_band_last = g_band_building;
+		g_band_building = 0;
+		g_band_last_by_class.swap(g_band_building_by_class);
+		g_band_building_by_class.clear();
+		g_band_seen.swap(g_band_seen_building); // drops creatures that left the band or are gone
+		g_band_seen_building.clear();
 		g_seconds_since_census = 0;
 
 		std::vector<ClassRule> rules;
@@ -968,7 +1098,9 @@ namespace
 			if (dino != nullptr && Enqueue(dino, g_census_items[id].class_index, false, g_census_items[id].in_block_area))
 			{
 				++newly_queued;
-				if (g_census_items[id].in_block_area)
+				if (g_census_items[id].in_band)
+					++g_band_queued;
+				else if (g_census_items[id].in_block_area)
 					++g_block_area_queued;
 			}
 		}
@@ -1414,6 +1546,7 @@ namespace
 		{
 			g_seconds_since_log = 0;
 			g_mesh_logged_this_minute = 0;
+			g_band_logged_this_minute = 0;
 			LogRemovals();
 		}
 
@@ -1712,6 +1845,26 @@ namespace
 					<< static_cast<int>(churn.y) << " " << static_cast<int>(churn.z) << ")\n";
 			}
 		}
+		if (g_ocean_band.enabled)
+		{
+			out << "Genesis ocean band (" << (g_ocean_band.remove ? "removing" : "report only") << "; Z " << static_cast<int>(kBandBottomZ)
+				<< " to " << static_cast<int>(kBandTopZ) << ", to " << static_cast<int>(kBandCoralTopZ) << " under the coral zone): "
+				<< g_band_last << " in it at the last census, " << g_band_queued << " queued for removal since load\n";
+			std::vector<std::pair<size_t, int>> rows;
+			for (const auto& [c, n] : g_band_last_by_class)
+				rows.emplace_back(n, c);
+			std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+			if (!rows.empty())
+			{
+				out << "  by class:";
+				for (size_t i = 0; i < rows.size() && i < 8; ++i)
+					out << (i == 0 ? " " : ", ") << g_classes[rows[i].second].info.short_name << " " << rows[i].first;
+				out << "\n";
+			}
+			for (const BandSpot& spot : g_band_recent)
+				out << "  at " << static_cast<int>(spot.x) << " " << static_cast<int>(spot.y) << " " << static_cast<int>(spot.z) << " ("
+					<< g_classes[spot.class_index].info.short_name << ")\n";
+		}
 		out << "Summoned (appeared outside a zone spawn): " << g_summoned.size() << " tracked, " << g_summoned_seen
 			<< " since load; zone spawn calls " << g_zone_spawn_calls
 			<< (g_zone_hook_installed ? "" : " (hook not installed)")
@@ -1989,6 +2142,8 @@ namespace
 			<< ", LogRemovals " << (g_settings.log_removals ? "true" : "false") << ", RefuseFullEntries "
 			<< (g_settings.refuse_full_entries ? "true" : "false") << ", IgnoreSummoned " << (g_settings.ignore_summoned ? "true" : "false") << ", ChurnRemoved "
 			<< g_settings.churn_removed << " of " << kChurnWindow << "\n";
+		if (g_ocean_band.enabled)
+			out << kOceanBandKey << ": " << (g_ocean_band.remove ? "removing" : "report only") << " (ASA Genesis 1 ocean band)\n";
 		if (g_rules == nullptr)
 		{
 			out << "No section for this map and no Default section, so nothing is ruled here\n";
