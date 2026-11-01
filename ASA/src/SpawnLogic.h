@@ -142,6 +142,7 @@ namespace SpawnControl
 		double x = 0, y = 0, z = 0;
 		bool has_z = false;
 		double radius = 0;                 // Unreal units
+		bool is_auto = false;              // added by AutoBlockRepeats; kept in <Map>.auto.json
 	};
 
 	constexpr int kZoneStopAfter = 3;      // spawns inside a block area, none outside, before a zone is stopped
@@ -188,6 +189,22 @@ namespace SpawnControl
 		bool ignore_foliage = true;        // a hit on foliage (trees, bushes) with ground below counts as clear
 		std::vector<std::string> exclude;
 	};
+
+	// AutoBlockRepeats: a spot where under-mesh removals keep happening (the repeat spots List shows) becomes a
+	// block area by itself, saved to <Map>.auto.json in the SharedConfig folder. Off unless Enabled.
+	struct AutoBlockRule
+	{
+		bool enabled = false;
+		int min_removed = 5;               // removals within one spot before it is blocked
+		int max_radius_foundations = 15;   // wider spots are too scattered to be one spawn point; left to List
+		int max_areas = 50;                // auto areas kept per map
+	};
+
+	// The file a map's auto areas are kept in, next to its <Map>.json in the SharedConfig folder.
+	inline std::string AutoAreasFileName(const std::string& section)
+	{
+		return section + ".auto.json";
+	}
 
 	// The under-mesh test reports foliage instances (tree trunks, bushes) above a creature as the surface it is
 	// under. Those creatures stand on the ground; UnderMesh.IgnoreFoliage counts them clear when ground is below.
@@ -266,6 +283,7 @@ namespace SpawnControl
 		std::vector<BlockArea> block_areas;
 		OverlapRule overlap;
 		UnderMeshRule under_mesh;
+		AutoBlockRule auto_block;
 
 		// The JSON this section was read from: the Default section, and the map's own entries laid
 		// over it. Kept for the Rules command, which says where each value came from.
@@ -303,6 +321,8 @@ namespace SpawnControl
 
 		// Files the settings were read from, for the load line and the Rules command.
 		std::vector<std::string> sources;
+		// The SharedConfig folder, where <Map>.auto.json files are read and written; empty without one.
+		std::string auto_folder;
 
 		// Rolling refresh: wild creatures replaced a few at a time so the zones respawn them with fresh
 		// levels, instead of a full wipe. 0 hours = off.
@@ -574,6 +594,30 @@ namespace SpawnControl
 				}
 			}
 
+			if (section.contains("AutoBlockRepeats"))
+			{
+				const nlohmann::json& auto_block = section["AutoBlockRepeats"];
+				if (!auto_block.is_object())
+					warnings.push_back(where + "AutoBlockRepeats must be an object with Enabled, MinRemoved, MaxRadiusInFoundations and MaxAreas; ignored");
+				else
+				{
+					if (auto_block.contains("Enabled"))
+					{
+						if (auto_block["Enabled"].is_boolean())
+							rules.auto_block.enabled = auto_block["Enabled"].get<bool>();
+						else
+							warnings.push_back(where + "AutoBlockRepeats.Enabled must be true or false; using false");
+					}
+					std::vector<std::string> number_warnings;
+					rules.auto_block.min_removed = ReadInt(auto_block, "MinRemoved", rules.auto_block.min_removed, 3, number_warnings);
+					rules.auto_block.max_radius_foundations =
+						ReadInt(auto_block, "MaxRadiusInFoundations", rules.auto_block.max_radius_foundations, 5, number_warnings);
+					rules.auto_block.max_areas = ReadInt(auto_block, "MaxAreas", rules.auto_block.max_areas, 1, number_warnings);
+					for (const std::string& warning : number_warnings)
+						warnings.push_back(where + "AutoBlockRepeats." + warning);
+				}
+			}
+
 			if (section.contains("BlockAreas"))
 				rules.block_areas = ReadAreas(section["BlockAreas"], where + "BlockAreas", warnings);
 			return rules;
@@ -593,7 +637,7 @@ namespace SpawnControl
 		}
 
 		constexpr std::initializer_list<const char*> kMapKeys = { "Block", "Limit", "GroupLimit", "Density", "DensitySkip", "BlockAreas", "Overlap",
-			"UnderMesh" };
+			"UnderMesh", "AutoBlockRepeats" };
 
 		// Keys nobody reads are ignored by ARK-style configs without a word; here each one is a warning, with
 		// a hint when the key exists one level up or down.
@@ -647,6 +691,8 @@ namespace SpawnControl
 				WarnUnknownAreas(map["BlockAreas"], where + "BlockAreas", warnings);
 			if (map.contains("Overlap"))
 				WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
+			if (map.contains("AutoBlockRepeats"))
+				WarnUnknown(map["AutoBlockRepeats"], { "Enabled", "MinRemoved", "MaxRadiusInFoundations", "MaxAreas" }, where + "AutoBlockRepeats.", warnings);
 			if (map.contains("UnderMesh"))
 				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "RemoveNoGround", "IncludeStasis", "StopZones", "TraceGround", "IgnoreFoliage", "Exclude" }, where + "UnderMesh.", warnings);
 		}
@@ -1611,6 +1657,8 @@ namespace SpawnControl
 		namespace fs = std::filesystem;
 		std::vector<std::string> warnings;
 		std::vector<std::string> sources;
+		std::string auto_folder;
+		std::vector<fs::path> auto_paths;
 
 		const fs::path local_path = plugin_folder / "config.json";
 		nlohmann::json root = ParseJsonText(detail::ReadWholeFile(local_path), "config.json", warnings);
@@ -1649,6 +1697,7 @@ namespace SpawnControl
 				root.erase("SharedConfig");
 
 				std::vector<fs::path> files;
+				std::vector<fs::path> auto_files;   // <Map>.auto.json: areas AutoBlockRepeats added, attached below
 				std::error_code list_error;
 				for (fs::directory_iterator it(shared, list_error), end; !list_error && it != end; it.increment(list_error))
 				{
@@ -1656,11 +1705,20 @@ namespace SpawnControl
 					std::error_code type_error;
 					if (it->is_regular_file(type_error) && EqualsNoCase(detail::Utf8FromPath(path.extension()), ".json") &&
 						!EqualsNoCase(detail::Utf8FromPath(path.filename()), "config.json"))
-						files.push_back(path);
+					{
+						const std::string stem = detail::Utf8FromPath(path.stem());
+						if (stem.size() > 5 && EqualsNoCase(stem.substr(stem.size() - 5), ".auto"))
+							auto_files.push_back(path);
+						else
+							files.push_back(path);
+					}
 				}
 				if (list_error)
 					throw std::runtime_error("cannot list " + detail::Utf8FromPath(shared) + ": " + list_error.message());
 				std::sort(files.begin(), files.end());
+				std::sort(auto_files.begin(), auto_files.end());
+				auto_folder = detail::Utf8FromPath(shared);
+				auto_paths = std::move(auto_files);
 
 				for (const fs::path& path : files)
 				{
@@ -1706,6 +1764,50 @@ namespace SpawnControl
 
 		Settings settings = ParseSettings(root);
 		settings.warnings.insert(settings.warnings.begin(), warnings.begin(), warnings.end());
+
+		// Each <Map>.auto.json adds its areas to that map's block areas, marked as auto. A broken one is a
+		// warning, not a failure: the server that writes it must still load.
+		settings.auto_folder = auto_folder;
+		for (const fs::path& path : auto_paths)
+		{
+			const std::string file = detail::Utf8FromPath(path.filename());
+			std::string section = detail::Utf8FromPath(path.stem());
+			section = section.substr(0, section.size() - 5);
+			MapRules* target = nullptr;
+			for (MapRules& rules : settings.maps)
+			{
+				if (EqualsNoCase(rules.name, section))
+					target = &rules;
+			}
+			if (target == nullptr)
+			{
+				settings.warnings.push_back(file + ": no " + section + ".json map file to add these areas to; ignored");
+				continue;
+			}
+			nlohmann::json body;
+			try
+			{
+				body = ParseJsonText(detail::ReadWholeFile(path), file, settings.warnings);
+			}
+			catch (const std::exception& e)
+			{
+				settings.warnings.push_back(file + ": " + e.what() + "; its areas are not in force");
+				continue;
+			}
+			detail::WarnUnknown(body, { "BlockAreas" }, file + " ", settings.warnings);
+			if (!body.is_object() || !body.contains("BlockAreas"))
+			{
+				settings.warnings.push_back(file + " needs a BlockAreas list; ignored");
+				continue;
+			}
+			detail::WarnUnknownAreas(body["BlockAreas"], file + " BlockAreas", settings.warnings);
+			for (BlockArea& area : detail::ReadAreas(body["BlockAreas"], file + " BlockAreas", settings.warnings))
+			{
+				area.is_auto = true;
+				target->block_areas.push_back(std::move(area));
+			}
+			sources.push_back(detail::Utf8FromPath(path));
+		}
 		settings.sources = std::move(sources);
 		return settings;
 	}
@@ -1926,5 +2028,43 @@ namespace SpawnControl
 				break;
 		}
 		return spots;
+	}
+
+	// AutoBlockRepeats: the repeat spots to turn into block areas now. Spots wider than the rule allows are
+	// left out (too scattered to be one spawn point), and no more than the room left under MaxAreas.
+	inline std::vector<RepeatSpot> AutoBlockSpots(const std::vector<RemovalPoint>& points, double reach, const AutoBlockRule& rule,
+		const std::vector<BlockArea>& existing, size_t auto_areas_now)
+	{
+		std::vector<RepeatSpot> out;
+		if (!rule.enabled || auto_areas_now >= static_cast<size_t>(rule.max_areas))
+			return out;
+		const size_t room = static_cast<size_t>(rule.max_areas) - auto_areas_now;
+		for (RepeatSpot& spot : FindRepeatSpots(points, reach, rule.min_removed, existing, room + 10))
+		{
+			if (spot.radius_foundations > rule.max_radius_foundations)
+				continue;
+			out.push_back(std::move(spot));
+			if (out.size() >= room)
+				break;
+		}
+		return out;
+	}
+
+	// The contents of <Map>.auto.json: that map's auto areas, in the BlockAreas format so they can be edited
+	// or moved into the map file by hand.
+	inline nlohmann::json AutoAreasJson(const std::vector<BlockArea>& areas)
+	{
+		nlohmann::json list = nlohmann::json::array();
+		for (const BlockArea& area : areas)
+		{
+			if (!area.is_auto)
+				continue;
+			nlohmann::json location = nlohmann::json::array({ static_cast<long long>(std::llround(area.x)), static_cast<long long>(std::llround(area.y)) });
+			if (area.has_z)
+				location.push_back(static_cast<long long>(std::llround(area.z)));
+			list.push_back({ { "Name", area.name }, { "Location", location },
+				{ "RadiusInFoundations", static_cast<int>(std::llround(area.radius / kFoundation)) } });
+		}
+		return nlohmann::json{ { "BlockAreas", list } };
 	}
 }

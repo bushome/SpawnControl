@@ -27,6 +27,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <deque>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <random>
@@ -330,6 +331,10 @@ namespace
 	std::unordered_set<uint64_t> g_band_seen;                     // ...and the last one: already logged
 	std::deque<BandSpot> g_band_recent;                           // newest first, one per creature
 	uint64_t g_band_queued = 0;                                   // queued for removal since load
+
+	// AutoBlockRepeats: repeat spots of under-mesh removals turned into block areas, kept in <Map>.auto.json.
+	uint64_t g_auto_areas_added = 0;        // since load
+	bool g_auto_block_warned = false;       // "cannot run here" said once per load
 	size_t g_band_logged_this_minute = 0;
 	uint64_t g_summoned_seen = 0;                       // creatures marked summoned since load
 	std::unordered_set<uint64_t> g_summoned;            // wild creatures that appeared outside a zone spawn
@@ -612,6 +617,7 @@ namespace
 			g_section_source += ", which has no section of its own";
 		}
 		ReadOceanBand();
+		g_auto_block_warned = false;
 		if (g_map_known && !was_known)
 			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);
@@ -1041,6 +1047,105 @@ namespace
 		g_refresh_items.clear();
 	}
 
+	// Writes this map's auto areas to <Map>.auto.json in the SharedConfig folder, through a temporary file so
+	// a reader never sees half of it.
+	void SaveAutoAreas()
+	{
+		namespace fs = std::filesystem;
+		const fs::path path = SpawnControl::detail::PathFromUtf8(g_settings.auto_folder) / SpawnControl::detail::PathFromUtf8(AutoAreasFileName(g_rules->name));
+		fs::path temp = path;
+		temp += ".tmp";
+		try
+		{
+			{
+				std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+				if (!file.is_open())
+					throw std::runtime_error("cannot write " + SpawnControl::detail::Utf8FromPath(temp));
+				file << AutoAreasJson(g_rules->block_areas).dump(2) << "\n";
+				if (!file)
+					throw std::runtime_error("write failed for " + SpawnControl::detail::Utf8FromPath(temp));
+			}
+			fs::rename(temp, path);
+		}
+		catch (const std::exception& e)
+		{
+			Log::GetLog()->error("AutoBlockRepeats: could not save {}: {}; the new areas hold until the next reload",
+				SpawnControl::detail::Utf8FromPath(path), e.what());
+		}
+	}
+
+	// After each census: repeat spots of under-mesh removals become block areas, so their zones are stopped
+	// and anything still inside is removed, the same as an area pasted into the map file.
+	void RunAutoBlock()
+	{
+		if (g_rules == nullptr || !g_rules->auto_block.enabled)
+			return;
+		const char* reason = nullptr;
+		if (g_rules == &g_settings.default_rules)
+			reason = "this map has no map file of its own to keep auto areas for";
+		else if (g_settings.auto_folder.empty())
+			reason = "it needs a SharedConfig folder to keep <Map>.auto.json in";
+		else if (!g_rules->under_mesh.enabled || !g_rules->under_mesh.remove)
+			reason = "it works from under-mesh removals, so it needs UnderMesh with Remove";
+		if (reason != nullptr)
+		{
+			if (!g_auto_block_warned)
+				Log::GetLog()->warn("AutoBlockRepeats is on for {} but {}; nothing added", g_rules->name, reason);
+			g_auto_block_warned = true;
+			return;
+		}
+
+		size_t auto_now = 0;
+		int next_number = 1;
+		for (const BlockArea& area : g_rules->block_areas)
+		{
+			if (!area.is_auto)
+				continue;
+			++auto_now;
+			int number = 0;
+			if (std::sscanf(area.name.c_str(), "Auto %d", &number) == 1 && number >= next_number)
+				next_number = number + 1;
+		}
+		const std::vector<RemovalPoint> points(g_mesh_removal_points.begin(), g_mesh_removal_points.end());
+		const std::vector<RepeatSpot> spots = AutoBlockSpots(points, kRepeatSpotReach, g_rules->auto_block, g_rules->block_areas, auto_now);
+		if (spots.empty())
+			return;
+
+		MapRules& rules = const_cast<MapRules&>(*g_rules); // g_rules points into g_settings, which is not const
+		for (const RepeatSpot& spot : spots)
+		{
+			const int c = spot.classes.empty() ? -1 : spot.classes[0].second;
+			const std::string first_class = c >= 0 && static_cast<size_t>(c) < g_classes.size() ? g_classes[c].info.short_name : "spot";
+			BlockArea area;
+			area.name = "Auto " + std::to_string(next_number++) + " " + first_class;
+			area.x = std::round(spot.x);
+			area.y = std::round(spot.y);
+			area.z = std::round(spot.z);
+			area.has_z = true;
+			area.radius = spot.radius_foundations * kFoundation;
+			area.is_auto = true;
+			std::string classes;
+			for (size_t k = 0; k < spot.classes.size() && k < 3; ++k)
+			{
+				const int kc = spot.classes[k].second;
+				classes += (k == 0 ? "" : ", ") + std::to_string(spot.classes[k].first) + " " +
+					(kc >= 0 && static_cast<size_t>(kc) < g_classes.size() ? g_classes[kc].info.short_name : std::string("?"));
+			}
+			Log::GetLog()->info("AutoBlockRepeats: added block area \"{}\" at {:.0f} {:.0f} {:.0f}, {} foundations ({} removed there: {})",
+				area.name, area.x, area.y, area.z, spot.radius_foundations, spot.count, classes);
+			// Removals inside the new area are done with: they must not seed another area next to it.
+			const std::vector<BlockArea> just_this{ area };
+			const auto inside = [&](const RemovalPoint& point) { return BlockAreaAt(just_this, point.x, point.y, point.z) >= 0; };
+			g_mesh_removal_points.erase(std::remove_if(g_mesh_removal_points.begin(), g_mesh_removal_points.end(), inside),
+				g_mesh_removal_points.end());
+			g_mesh_suspect_points.erase(std::remove_if(g_mesh_suspect_points.begin(), g_mesh_suspect_points.end(), inside),
+				g_mesh_suspect_points.end());
+			rules.block_areas.push_back(std::move(area));
+			++g_auto_areas_added;
+		}
+		SaveAutoAreas();
+	}
+
 	void FinishCensus()
 	{
 		g_census_running = false;
@@ -1051,6 +1156,7 @@ namespace
 		g_band_seen.swap(g_band_seen_building); // drops creatures that left the band or are gone
 		g_band_seen_building.clear();
 		g_seconds_since_census = 0;
+		RunAutoBlock(); // new areas apply from the next census
 
 		std::vector<ClassRule> rules;
 		rules.reserve(g_classes.size());
@@ -1995,13 +2101,23 @@ namespace
 					out << " " << static_cast<int>(area.z) << " (sphere)";
 				else
 					out << " (any height)";
-				out << "\n";
+				out << (area.is_auto ? " (auto)" : "") << "\n";
 			}
 			if (!g_rules->block_areas.empty())
 			{
 				out << "  block areas: " << g_block_area_queued << " queued since load, " << g_last.in_block_area
 					<< " inside at the last census; zones stopped " << g_zones_stopped << " (" << g_stopped_zone_refusals
 					<< " entries refused)\n";
+				size_t auto_count = 0;
+				for (const BlockArea& area : g_rules->block_areas)
+					auto_count += area.is_auto ? 1 : 0;
+				if (g_rules->auto_block.enabled || auto_count > 0)
+					out << "  auto block areas: " << auto_count << " (" << g_auto_areas_added << " added since load"
+						<< (g_rules->auto_block.enabled ? "; adding at " + std::to_string(g_rules->auto_block.min_removed) + "+ removed within " +
+							std::to_string(static_cast<int>(kRepeatSpotReach / kFoundation)) + " foundations, up to " +
+							std::to_string(g_rules->auto_block.max_radius_foundations) + " foundations wide, at most " +
+							std::to_string(g_rules->auto_block.max_areas) : std::string("; AutoBlockRepeats off, kept from ") + AutoAreasFileName(g_rules->name))
+						<< ")\n";
 				for (const auto& [zone, stats] : g_zone_stats)
 				{
 					if (stats.stopped && !stats.by_mesh)

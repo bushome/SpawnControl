@@ -544,6 +544,9 @@ namespace
 			g_rules = &g_settings.default_rules;
 			g_section_source += ", which has no section of its own";
 		}
+		// Areas already in <Map>.auto.json apply here like any other; adding new ones is ASA only for now.
+		if (g_map_known && g_rules != nullptr && g_rules->auto_block.enabled)
+			Log::GetLog()->warn("AutoBlockRepeats is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && !was_known)
 			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);
@@ -1825,7 +1828,7 @@ namespace
 					out << " " << static_cast<int>(area.z) << " (sphere)";
 				else
 					out << " (any height)";
-				out << "\n";
+				out << (area.is_auto ? " (auto)" : "") << "\n";
 			}
 			if (!g_rules->block_areas.empty())
 			{

@@ -821,6 +821,23 @@ static void TestSharedConfig()
 	const MapRules* center = FindMapRules(shared, "Center");
 	CHECK(center != nullptr && LimitOf(*center, "Dodo_Character_BP_C") == 250 && center->under_mesh.remove);
 
+	// <Map>.auto.json: not a section of its own; its areas join that map's block areas, marked auto.
+	WriteText(root / "shared" / "Center.auto.json", R"({ "BlockAreas": [ { "Name": "Auto 1 Dodo", "Location": [ 100, 200, 300 ], "RadiusInFoundations": 8 } ] })");
+	WriteText(root / "shared" / "Nowhere.auto.json", R"({ "BlockAreas": [] })");
+	Settings with_auto = LoadConfigFiles(plugin);
+	CHECK(with_auto.maps.size() == 2 && !with_auto.auto_folder.empty());
+	center = FindMapRules(with_auto, "Center");
+	CHECK(center != nullptr && center->block_areas.size() == 1 && center->block_areas[0].is_auto &&
+		center->block_areas[0].radius == 8 * kFoundation && center->block_areas[0].has_z);
+	CHECK(AnyContains(with_auto.warnings, "Nowhere.auto.json: no Nowhere.json map file"));
+	WriteText(root / "shared" / "Center.auto.json", R"({ "BlockAreas": [ )");
+	with_auto = LoadConfigFiles(plugin);   // a broken auto file is a warning, never a failed load
+	center = FindMapRules(with_auto, "Center");
+	CHECK(center != nullptr && center->block_areas.empty() && AnyContains(with_auto.warnings, "Center.auto.json"));
+	fs::remove(root / "shared" / "Center.auto.json");
+	fs::remove(root / "shared" / "Nowhere.auto.json");
+	CHECK(!LoadConfigFiles(plugin).auto_folder.empty());   // known even with no auto file yet, so the first can be written
+
 	// A map file replaces the same section written in the shared config.json, with a warning.
 	WriteText(root / "shared" / "config.json", R"({ "Maps": { "center": { "Limit": { "X_C": 1 } } } })");
 	shared = LoadConfigFiles(plugin);
@@ -845,6 +862,71 @@ static void TestSharedConfig()
 	CHECK_THROWS(LoadConfigFiles(plugin));
 
 	fs::remove_all(root);
+}
+
+static void TestAutoBlock()
+{
+	// Off unless enabled; values checked and reported under their own name.
+	CHECK(!ParseConfigText(R"({ "Maps": { "A": {} } })").maps[0].auto_block.enabled);
+	const Settings on = ParseConfigText(R"({ "Default": { "AutoBlockRepeats": { "Enabled": true, "MinRemoved": 6 } },
+		"Maps": { "A": { "AutoBlockRepeats": { "MaxRadiusInFoundations": 12 } }, "B": { "AutoBlockRepeats": { "Enabled": false } } } })");
+	CHECK(on.maps[0].auto_block.enabled && on.maps[0].auto_block.min_removed == 6 && on.maps[0].auto_block.max_radius_foundations == 12 &&
+		on.maps[0].auto_block.max_areas == 50);
+	CHECK(!on.maps[1].auto_block.enabled && on.maps[1].auto_block.min_removed == 6);
+	const Settings bad = ParseConfigText(R"({ "Maps": { "A": { "AutoBlockRepeats": { "Enabled": "yes", "MinRemoved": 2, "MaxAreas": 0, "Radius": 3 } },
+		"B": { "AutoBlockRepeats": true } } })");
+	CHECK(!bad.maps[0].auto_block.enabled && bad.maps[0].auto_block.min_removed == 5 && bad.maps[0].auto_block.max_areas == 50);
+	CHECK(AnyContains(bad.warnings, "Maps.A.AutoBlockRepeats.Enabled must be true or false"));
+	CHECK(AnyContains(bad.warnings, "Maps.A.AutoBlockRepeats.MinRemoved must be at least 3"));
+	CHECK(AnyContains(bad.warnings, "Maps.A.AutoBlockRepeats.MaxAreas must be at least 1"));
+	CHECK(AnyContains(bad.warnings, "Maps.A.AutoBlockRepeats.Radius is not a known setting"));
+	CHECK(AnyContains(bad.warnings, "Maps.B.AutoBlockRepeats must be an object"));
+
+	// Six removals on one spot become one area; disabled, full or too wide gives none.
+	std::vector<RemovalPoint> points;
+	for (int i = 0; i < 6; ++i)
+		points.push_back({ 1000.0 + i * 50, 2000.0, -500.0, 3 });
+	AutoBlockRule rule;
+	rule.enabled = true;
+	std::vector<RepeatSpot> spots = AutoBlockSpots(points, 10 * kFoundation, rule, {}, 0);
+	CHECK(spots.size() == 1 && spots[0].count == 6 && spots[0].radius_foundations == 5);
+	rule.min_removed = 7;
+	CHECK(AutoBlockSpots(points, 10 * kFoundation, rule, {}, 0).empty());
+	rule.min_removed = 5;
+	rule.max_areas = 3;
+	CHECK(AutoBlockSpots(points, 10 * kFoundation, rule, {}, 3).empty());
+	BlockArea there;
+	there.x = 1100;
+	there.y = 2000;
+	there.z = -500;
+	there.has_z = true;
+	there.radius = 5 * kFoundation;
+	CHECK(AutoBlockSpots(points, 10 * kFoundation, rule, { there }, 0).empty());   // already blocked
+	std::vector<RemovalPoint> wide;
+	for (int i = 0; i < 6; ++i)
+		wide.push_back({ i * 3.0 * kFoundation, 0.0, 0.0, 3 });   // 15 foundations end to end
+	rule.max_radius_foundations = 5;
+	CHECK(AutoBlockSpots(wide, 10 * kFoundation, rule, {}, 0).empty());
+	rule.enabled = false;
+	CHECK(AutoBlockSpots(points, 10 * kFoundation, rule, {}, 0).empty());
+
+	// The saved file holds only the auto areas, rounded, in the BlockAreas format, and reads back the same.
+	BlockArea pasted = there;
+	pasted.name = "By hand";
+	BlockArea automatic;
+	automatic.name = "Auto 1 Dodo_Character_BP_C";
+	automatic.x = 100.4;
+	automatic.y = -200.6;
+	automatic.z = 300.5;
+	automatic.has_z = true;
+	automatic.radius = 7 * kFoundation;
+	automatic.is_auto = true;
+	const nlohmann::json saved = AutoAreasJson({ pasted, automatic });
+	CHECK(saved["BlockAreas"].size() == 1 && saved["BlockAreas"][0]["Name"] == "Auto 1 Dodo_Character_BP_C");
+	CHECK(saved["BlockAreas"][0]["Location"] == nlohmann::json::array({ 100, -201, 301 }) && saved["BlockAreas"][0]["RadiusInFoundations"] == 7);
+	std::vector<std::string> read_warnings;
+	const std::vector<BlockArea> back = SpawnControl::detail::ReadAreas(saved["BlockAreas"], "x", read_warnings);
+	CHECK(back.size() == 1 && read_warnings.empty() && back[0].radius == 7 * kFoundation && back[0].z == 301);
 }
 
 static void TestMeshZoneStop()
@@ -980,6 +1062,7 @@ int main(int argc, char** argv)
 	TestRefresh();
 	TestDefaultSection();
 	TestSharedConfig();
+	TestAutoBlock();
 	TestMeshZoneStop();
 	TestChurnAndSources();
 

@@ -170,7 +170,10 @@
       },
       "BlockAreas": [
         { "Name": "Misplaced spawner", "Location": [ 0, 0, -60000 ], "RadiusInFoundations": 30 }
-      ]
+      ],
+      // Repeat spots of under-mesh removals become block areas by themselves, saved to <Map>.auto.json in the
+      // SharedConfig folder (needs UnderMesh Remove and a map file). Off unless Enabled.
+      "AutoBlockRepeats": { "Enabled": false, "MinRemoved": 5, "MaxRadiusInFoundations": 15, "MaxAreas": 50 }
     }
   }
 }
