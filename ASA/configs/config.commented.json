@@ -26,6 +26,10 @@
     // Zones choosing what to spawn skip entries whose creatures are all blocked or at their limit, so they
     // spawn other species instead of creatures that would only be removed again.
     "RefuseFullEntries": true,
+    // A zone with this many of its last 20 spawns removed on arrival for being over a limit is held back while
+    // those classes are full (1 to 20). Group entries that mix full and open classes keep a churning zone
+    // below 20 of 20, so the default is 12.
+    "ChurnRemoved": 12,
     // Creatures summoned by another creature (a Gloon's Revenant escorts) are counted but never limited or
     // removed: the summoner would only replace them. Limit the summoner instead. A creature counts as
     // summoned when it appears after the first census without a spawn zone spawning it.

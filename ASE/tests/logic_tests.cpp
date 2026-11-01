@@ -866,12 +866,24 @@ static void TestChurnAndSources()
 	CHECK(window.Churning() && window.Removed() == kChurnWindow);
 	window.Add(false);
 	window.Add(false);
-	CHECK(window.Churning() && window.Removed() == kChurnWindow - 2);   // 18 of the last 20
+	CHECK(window.Churning(18) && window.Removed() == kChurnWindow - 2);   // 18 of the last 20
 	window.Add(false);
-	CHECK(!window.Churning());               // 17 of 20: a zone that mostly spawns other things keeps going
+	CHECK(!window.Churning(18) && window.Churning());   // 17 of 20: under a strict 18, over the default 12
 	for (int i = 0; i < kChurnWindow; ++i)
 		window.Add(i % 2 == 0);
-	CHECK(!window.Churning() && window.Removed() == kChurnWindow / 2 && window.count == kChurnWindow);
+	CHECK(!window.Churning() && window.Removed() == kChurnWindow / 2 && window.count == kChurnWindow);   // a mixed group entry at 50%
+	ChurnWindow mixed;
+	for (int i = 0; i < kChurnWindow; ++i)
+		mixed.Add(i < kChurnRemoved);
+	CHECK(mixed.Churning() && mixed.Removed() == kChurnRemoved);   // 12 of 20: held by default
+	CHECK(!mixed.Churning(13));
+
+	CHECK(ParseConfigText(R"({})").churn_removed == kChurnRemoved);
+	CHECK(ParseConfigText(R"({ "General": { "ChurnRemoved": 16 } })").churn_removed == 16);
+	const Settings too_high = ParseConfigText(R"({ "General": { "ChurnRemoved": 21 } })");
+	CHECK(too_high.churn_removed == kChurnRemoved && AnyContains(too_high.warnings, "at most 20"));
+	const Settings too_low = ParseConfigText(R"({ "General": { "ChurnRemoved": 0 } })");
+	CHECK(too_low.churn_removed == kChurnRemoved && AnyContains(too_low.warnings, "ChurnRemoved must be at least 1"));
 
 	CHECK(SummarizeSources({ "D:\\a\\config.json" }) == "D:\\a\\config.json");
 	CHECK(SummarizeSources({ "D:\\s\\config.json", "D:\\s\\Aberration.json", "D:\\s\\Default.json", "D:\\s\\Island.json" }) ==

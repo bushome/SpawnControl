@@ -218,13 +218,17 @@ namespace
 		double x = 0, y = 0, z = 0; // where its last counted creature was: zone managers have no useful location
 	};
 
-	// Zones whose spawns are almost all removed on arrival for being over a limit (see ChurnWindow).
+	// Zones whose spawns are mostly removed on arrival for being over a limit (see ChurnWindow and
+	// General.ChurnRemoved). Kept across reloads: a held zone re-checks its classes against the current
+	// limits on every spawn pass, so a raised limit releases it by itself.
 	struct ZoneChurn
 	{
 		ChurnWindow window;
 		std::vector<int> classes;   // classes it spawned over their limit, newest kept
 		bool holding = false;       // spawning held back while those classes are full
-		int holds = 0;              // times it was held back since the last reload
+		int holds = 0;              // times it was held back since load
+		uint64_t spawned = 0;       // its spawns seen since load, kept or not
+		uint64_t removed = 0;       // ...of which removed on arrival for being over a limit
 		double x = 0, y = 0, z = 0;
 	};
 	std::unordered_map<ANPCZoneManager*, ZoneChurn> g_zone_churn;
@@ -546,7 +550,7 @@ namespace
 		g_mesh_queue.clear(); // classes may have left the under-mesh rule; the next census queues again
 		g_zones_stopped = 0;
 		g_mesh_zones_stopped = 0;
-		g_zone_churn.clear(); // limits may have changed
+		// g_zone_churn is kept: clearing it let every churning zone run free until it was learned again.
 		for (auto& [key, origin] : g_creature_zone)
 			origin.counted_clear = false; // zone counts start over with the stats
 
@@ -1157,8 +1161,10 @@ namespace
 	{
 		ZoneChurn& churn = g_zone_churn[zone];
 		churn.window.Add(removed);
+		++churn.spawned;
 		if (removed)
 		{
+			++churn.removed;
 			auto known = std::find(churn.classes.begin(), churn.classes.end(), class_index);
 			if (known != churn.classes.end())
 				churn.classes.erase(known);
@@ -1169,7 +1175,7 @@ namespace
 			churn.y = static_cast<double>(location.Y);
 			churn.z = static_cast<double>(location.Z);
 		}
-		if (churn.holding || !churn.window.Churning())
+		if (churn.holding || !churn.window.Churning(g_settings.churn_removed))
 			return;
 		churn.holding = true;
 		if (++churn.holds == 1)
@@ -1650,7 +1656,8 @@ namespace
 				ever += churn.holds > 0 ? 1 : 0;
 			}
 			out << "Churning zones (spawns over a limit, removed on arrival): " << holding << " held back now, " << ever
-				<< " since reload, " << g_churn_held_calls << " spawn passes skipped\n";
+				<< " since load, " << g_churn_held_calls << " spawn passes skipped; a zone is held at "
+				<< g_settings.churn_removed << " of its last " << kChurnWindow << " spawns removed\n";
 			size_t shown = 0;
 			for (const auto& [zone, churn] : g_zone_churn)
 			{
@@ -1662,6 +1669,28 @@ namespace
 					names += (names.empty() ? "" : ", ") + g_classes[c].info.short_name;
 				out << "  held: " << ObjectName(zone) << " (" << names << "; held " << churn.holds << " time(s); last at "
 					<< static_cast<int>(churn.x) << " " << static_cast<int>(churn.y) << " " << static_cast<int>(churn.z) << ")\n";
+			}
+
+			// Zones still feeding the queue without being held: the ones to look at when removals stay high.
+			std::vector<std::pair<uint64_t, const std::pair<ANPCZoneManager* const, ZoneChurn>*>> feeding;
+			for (const auto& entry : g_zone_churn)
+			{
+				if (!entry.second.holding && entry.second.removed > 0)
+					feeding.emplace_back(entry.second.removed, &entry);
+			}
+			std::sort(feeding.begin(), feeding.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+			if (!feeding.empty())
+				out << "  not held, most removed on arrival since load:\n";
+			for (size_t i = 0; i < feeding.size() && i < 5; ++i)
+			{
+				const ZoneChurn& churn = feeding[i].second->second;
+				std::string names;
+				for (int c : churn.classes)
+					names += (names.empty() ? "" : ", ") + g_classes[c].info.short_name;
+				out << "  feeding: " << ObjectName(feeding[i].second->first) << " (" << churn.removed << " of " << churn.spawned
+					<< " removed, " << (churn.spawned > 0 ? churn.removed * 100 / churn.spawned : 0) << "%; last " << kChurnWindow << ": "
+					<< churn.window.Removed() << " removed; " << names << "; last at " << static_cast<int>(churn.x) << " "
+					<< static_cast<int>(churn.y) << " " << static_cast<int>(churn.z) << ")\n";
 			}
 		}
 		out << "Summoned (appeared outside a zone spawn): " << g_summoned.size() << " tracked, " << g_summoned_seen
@@ -1937,7 +1966,8 @@ namespace
 		out << "General: RemovalsPerTick " << g_settings.removals_per_tick << ", CensusIntervalSeconds " << g_settings.census_interval_seconds
 			<< ", CensusActorsPerTick " << g_settings.census_actors_per_tick << ", NearPlayerDistance " << g_settings.near_player_distance
 			<< ", LogRemovals " << (g_settings.log_removals ? "true" : "false") << ", RefuseFullEntries "
-			<< (g_settings.refuse_full_entries ? "true" : "false") << ", IgnoreSummoned " << (g_settings.ignore_summoned ? "true" : "false") << "\n";
+			<< (g_settings.refuse_full_entries ? "true" : "false") << ", IgnoreSummoned " << (g_settings.ignore_summoned ? "true" : "false") << ", ChurnRemoved "
+			<< g_settings.churn_removed << " of " << kChurnWindow << "\n";
 		if (g_rules == nullptr)
 		{
 			out << "No section for this map and no Default section, so nothing is ruled here\n";

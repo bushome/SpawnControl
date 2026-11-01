@@ -280,6 +280,7 @@ namespace SpawnControl
 		bool log_removals = true;
 		bool refuse_full_entries = true;       // zones skip spawn entries whose creatures are all at their limit
 		bool ignore_summoned = true;           // creatures another creature summoned (escorts) are outside the rules
+		int churn_removed = 12;                // a zone with this many of its last 20 spawns removed on arrival is held back
 
 		std::vector<std::string> protected_paths{ "/Missions/" };
 		std::vector<std::string> protected_families;
@@ -648,7 +649,7 @@ namespace SpawnControl
 				WarnUnknownMap(root["Default"], "Default.", warnings);
 			if (root.contains("General"))
 				WarnUnknown(root["General"], { "RemovalsPerTick", "CensusActorsPerTick", "CensusIntervalSeconds", "NearPlayerDistance",
-					"LogRemovals", "RefuseFullEntries", "IgnoreSummoned" }, "General.", warnings);
+					"LogRemovals", "RefuseFullEntries", "IgnoreSummoned", "ChurnRemoved" }, "General.", warnings);
 			if (root.contains("Protect"))
 				WarnUnknown(root["Protect"], { "PathContains", "Families" }, "Protect.", warnings);
 			if (root.contains("Refresh"))
@@ -699,6 +700,15 @@ namespace SpawnControl
 				*target = general[key].get<bool>();
 			else
 				warnings.push_back(std::string("General.") + key + " must be true or false");
+		}
+
+		{
+			const int churn = detail::ReadInt(general, "ChurnRemoved", settings.churn_removed, 1, warnings);
+			if (churn > 20)
+				warnings.push_back("General.ChurnRemoved counts the last 20 spawns, so it can be at most 20; using " +
+					std::to_string(settings.churn_removed));
+			else
+				settings.churn_removed = churn;
 		}
 
 		const nlohmann::json protect = root.value("Protect", nlohmann::json::object());
@@ -1340,11 +1350,12 @@ namespace SpawnControl
 
 	// For the spawn hook: should a creature of this class that just appeared be queued for removal,
 	// given the counts as they stand after it was added?
-	// Churn: a zone whose spawns are almost all over a limit, and removed the moment they appear, spawns
+	// Churn: a zone whose spawns are mostly over a limit, and removed the moment they appear, spawns
 	// again at once to make up the loss, so the removals never end (a capped class the zone's entries can
-	// not be refused for). Such a zone is held back while the classes it churned are still full.
+	// not be refused for: group entries that mix full and open classes spawn anyway, and their full
+	// members are removed). Such a zone is held back while the classes it churned are still full.
 	constexpr int kChurnWindow = 20;      // the zone's last spawns looked at
-	constexpr int kChurnRemoved = 18;     // ...of which this many removed on arrival makes it churn
+	constexpr int kChurnRemoved = 12;     // ...of which this many removed on arrival makes it churn (General.ChurnRemoved)
 
 	struct ChurnWindow
 	{
@@ -1365,7 +1376,7 @@ namespace SpawnControl
 			return n;
 		}
 
-		bool Churning() const { return count >= kChurnWindow && Removed() >= kChurnRemoved; }
+		bool Churning(int needed = kChurnRemoved) const { return count >= kChurnWindow && Removed() >= needed; }
 	};
 
 	inline bool OverOnSpawn(const ClassRule& rule, int class_count, const std::vector<int>& group_counts,
