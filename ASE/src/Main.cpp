@@ -549,6 +549,8 @@ namespace
 			Log::GetLog()->warn("AutoBlockRepeats is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && g_rules != nullptr && !g_rules->enable_zones.empty())
 			Log::GetLog()->warn("EnableZones is not built for ASE yet; ignored for {}", g_rules->name);
+		if (g_map_known && g_rules != nullptr && !g_rules->spawn_points.empty())
+			Log::GetLog()->warn("SpawnPoints is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && !was_known)
 			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);

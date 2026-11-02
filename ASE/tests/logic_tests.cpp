@@ -936,6 +936,56 @@ static void TestAutoBlock()
 	CHECK(back.size() == 1 && read_warnings.empty() && back[0].radius == 7 * kFoundation && back[0].z == 301);
 }
 
+static void TestSpawnPoints()
+{
+	// Every way of writing a class names the same thing.
+	for (const char* written : { "/Game/ScorchedEarth/Dinos/Wyvern/Wyvern_Character_BP_Fire", "/Game/ScorchedEarth/Dinos/Wyvern/Wyvern_Character_BP_Fire.Wyvern_Character_BP_Fire",
+			 "/Game/ScorchedEarth/Dinos/Wyvern/Wyvern_Character_BP_Fire.Wyvern_Character_BP_Fire_C",
+			 "Blueprint'/Game/ScorchedEarth/Dinos/Wyvern/Wyvern_Character_BP_Fire.Wyvern_Character_BP_Fire'" })
+	{
+		const SpawnClass c = SpawnClassFromPath(written, 2);
+		CHECK(c.short_name == "Wyvern_Character_BP_Fire_C" && c.weight == 2);
+		CHECK(c.blueprint == "Blueprint'/Game/ScorchedEarth/Dinos/Wyvern/Wyvern_Character_BP_Fire.Wyvern_Character_BP_Fire'");
+	}
+
+	// Weighted pick over [0, 1).
+	const std::vector<SpawnClass> classes{ SpawnClassFromPath("/Game/A/One", 1), SpawnClassFromPath("/Game/A/Two", 3) };
+	CHECK(PickWeighted(classes, 0.0) == 0 && PickWeighted(classes, 0.24) == 0 && PickWeighted(classes, 0.26) == 1 && PickWeighted(classes, 0.999) == 1);
+
+	const Settings good = ParseConfigText(R"({ "Maps": { "R": { "SpawnPoints": [ { "Name": "Wyvern cave",
+		"Classes": { "/Game/ScorchedEarth/Dinos/Wyvern/Wyvern_Character_BP_Fire": 1, "/Game/ASA/Dinos/IceWyvern/Wyvern_Character_BP_Ice": 2 },
+		"Points": [ [ 5, -239538, 632 ], [ 100, 200, 300 ] ], "Target": 6, "AreaRadiusInFoundations": 150, "SpawnIntervalSeconds": 90,
+		"BaseLevels": [ 10, 30 ] } ] } } })");
+	CHECK(good.warnings.empty() && good.maps[0].spawn_points.size() == 1);
+	const SpawnPointSet& set = good.maps[0].spawn_points[0];
+	CHECK(set.name == "Wyvern cave" && set.classes.size() == 2 && set.points.size() == 2 && set.target == 6 &&
+		set.area_radius == 150 * kFoundation && set.interval_seconds == 90 && set.min_base_level == 10 && set.max_base_level == 30);
+	CHECK(set.points[0].y == -239538);   // Classes keep the JSON object's (sorted) key order: Ice first
+	CHECK(set.classes[0].short_name == "Wyvern_Character_BP_Ice_C" && set.classes[0].weight == 2 && set.classes[1].short_name == "Wyvern_Character_BP_Fire_C");
+
+	const Settings defaults = ParseConfigText(R"({ "Maps": { "R": { "SpawnPoints": [ { "Classes": { "/Game/A/One": 1 }, "Points": [ [ 0, 0, 0 ] ] } ] } } })");
+	const SpawnPointSet& plain = defaults.maps[0].spawn_points[0];
+	CHECK(plain.name == "Spawn points 1" && plain.target == 1 && plain.area_radius == 200 * kFoundation && plain.interval_seconds == 120 && plain.min_base_level == 0);
+
+	const Settings bad = ParseConfigText(R"({ "Maps": { "R": { "SpawnPoints": [
+		{ "Name": "No points", "Classes": { "/Game/A/One": 1 } },
+		{ "Classes": { "/Game/A/One": 0, "/Game/A/Two": "x" }, "Points": [ [ 0, 0 ], [ 1, 2, 3 ] ] },
+		{ "Classes": { "/Game/A/One": 1 }, "Points": [ [ 0, 0, 0 ] ], "Target": 0, "SpawnIntervalSeconds": 5, "BaseLevels": [ 30, 10 ], "Radius": 3 },
+		7 ] }, "Q": { "SpawnPoints": {} } } })");
+	const MapRules* r = FindMapRules(bad, "R");
+	CHECK(r != nullptr && r->spawn_points.size() == 1 && r->spawn_points[0].target == 1 && r->spawn_points[0].interval_seconds == 120 &&
+		r->spawn_points[0].min_base_level == 0);
+	CHECK(AnyContains(bad.warnings, "Maps.R.SpawnPoints[0] (No points) needs at least one class"));
+	CHECK(AnyContains(bad.warnings, "Maps.R.SpawnPoints[1].Classes./Game/A/One must be a weight above 0"));
+	CHECK(AnyContains(bad.warnings, "Maps.R.SpawnPoints[1].Points has an entry that is not [ x, y, z ]"));
+	CHECK(AnyContains(bad.warnings, "Maps.R.SpawnPoints[2].Target must be at least 1"));
+	CHECK(AnyContains(bad.warnings, "Maps.R.SpawnPoints[2].SpawnIntervalSeconds must be at least 10"));
+	CHECK(AnyContains(bad.warnings, "Maps.R.SpawnPoints[2].BaseLevels must be [ min, max ]"));
+	CHECK(AnyContains(bad.warnings, "Maps.R.SpawnPoints[2].Radius is not a known setting"));
+	CHECK(AnyContains(bad.warnings, "Maps.R.SpawnPoints[3] must be an object"));
+	CHECK(AnyContains(bad.warnings, "Maps.Q.SpawnPoints must be a list"));
+}
+
 static void TestMeshZoneStop()
 {
 	CHECK(!MeshZoneShouldStop(4, 0));     // too few removals yet
@@ -1070,6 +1120,7 @@ int main(int argc, char** argv)
 	TestDefaultSection();
 	TestSharedConfig();
 	TestAutoBlock();
+	TestSpawnPoints();
 	TestMeshZoneStop();
 	TestChurnAndSources();
 

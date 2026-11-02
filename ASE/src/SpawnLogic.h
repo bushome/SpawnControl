@@ -200,6 +200,67 @@ namespace SpawnControl
 		int max_areas = 50;                // auto areas kept per map
 	};
 
+	// SpawnPoints: creatures SpawnControl spawns itself, at points chosen by hand, for places the map's own
+	// spawn zones never fill (a cave a large creature does not fit the zone's random points in).
+	struct SpawnClass
+	{
+		std::string path;        // as written in the config
+		std::string short_name;  // Name_C, matched against creature classes when counting
+		std::string blueprint;   // Blueprint'/Game/.../Name.Name', for loading the class
+		double weight = 1;
+	};
+	struct SpawnPoint
+	{
+		double x = 0, y = 0, z = 0;
+	};
+	struct SpawnPointSet
+	{
+		std::string name;
+		std::vector<SpawnClass> classes;
+		std::vector<SpawnPoint> points;
+		int target = 1;                          // creatures of these classes kept in the area
+		double area_radius = 200 * kFoundation;  // around the points' centre, for counting
+		int interval_seconds = 120;              // at least this long between two spawns
+		int min_base_level = 0, max_base_level = 0; // 0: the game picks the level
+	};
+
+	// "/Game/X/Name", "/Game/X/Name.Name", "/Game/X/Name.Name_C" or "Blueprint'/Game/X/Name.Name'" all name the
+	// same class: Name_C for matching, Blueprint'/Game/X/Name.Name' for loading.
+	inline SpawnClass SpawnClassFromPath(const std::string& written, double weight)
+	{
+		SpawnClass out;
+		out.path = written;
+		out.weight = weight;
+		std::string path = written;
+		if (path.rfind("Blueprint'", 0) == 0)
+			path = path.substr(10);
+		if (!path.empty() && path.back() == '\'')
+			path.pop_back();
+		const size_t dot = path.find('.', path.find_last_of('/') == std::string::npos ? 0 : path.find_last_of('/'));
+		const std::string base = dot == std::string::npos ? path : path.substr(0, dot);
+		const size_t slash = base.find_last_of('/');
+		const std::string asset = slash == std::string::npos ? base : base.substr(slash + 1);
+		out.short_name = asset + "_C";
+		out.blueprint = "Blueprint'" + base + "." + asset + "'";
+		return out;
+	}
+
+	// The class to spawn next: roll is in [0, 1).
+	inline size_t PickWeighted(const std::vector<SpawnClass>& classes, double roll)
+	{
+		double total = 0;
+		for (const SpawnClass& spawn_class : classes)
+			total += spawn_class.weight;
+		double at = roll * total;
+		for (size_t i = 0; i < classes.size(); ++i)
+		{
+			if (at < classes[i].weight)
+				return i;
+			at -= classes[i].weight;
+		}
+		return classes.empty() ? 0 : classes.size() - 1;
+	}
+
 	// The file a map's auto areas are kept in, next to its <Map>.json in the SharedConfig folder.
 	inline std::string AutoAreasFileName(const std::string& section)
 	{
@@ -284,6 +345,7 @@ namespace SpawnControl
 		// Spawn zones (by object name, as SpawnControl.Zones prints them) to switch on when the map has them
 		// disabled. Checked again after every census.
 		std::vector<std::string> enable_zones;
+		std::vector<SpawnPointSet> spawn_points;
 		OverlapRule overlap;
 		UnderMeshRule under_mesh;
 		AutoBlockRule auto_block;
@@ -414,6 +476,77 @@ namespace SpawnControl
 				out.push_back(std::move(area));
 			}
 			return out;
+		}
+
+		inline void WarnUnknown(const nlohmann::json& object, std::initializer_list<const char*> known, const std::string& where,
+			std::vector<std::string>& warnings);
+
+		inline std::vector<SpawnPointSet> ReadSpawnPoints(const nlohmann::json& list, const std::string& where, std::vector<std::string>& warnings)
+		{
+			std::vector<SpawnPointSet> sets;
+			if (!list.is_array())
+			{
+				warnings.push_back(where + " must be a list of { Name, Classes, Points, Target } objects; ignored");
+				return sets;
+			}
+			for (size_t n = 0; n < list.size(); ++n)
+			{
+				const nlohmann::json& item = list[n];
+				const std::string at = where + "[" + std::to_string(n) + "]";
+				if (!item.is_object())
+				{
+					warnings.push_back(at + " must be an object; skipped");
+					continue;
+				}
+				WarnUnknown(item, { "Name", "Classes", "Points", "Target", "AreaRadiusInFoundations", "SpawnIntervalSeconds", "BaseLevels" }, at + ".", warnings);
+				SpawnPointSet set;
+				set.name = item.contains("Name") && item["Name"].is_string() ? item["Name"].get<std::string>() : "Spawn points " + std::to_string(n + 1);
+				if (item.contains("Classes") && item["Classes"].is_object())
+				{
+					for (auto it = item["Classes"].begin(); it != item["Classes"].end(); ++it)
+					{
+						if (!it.value().is_number() || it.value().get<double>() <= 0)
+							warnings.push_back(at + ".Classes." + it.key() + " must be a weight above 0; skipped");
+						else
+							set.classes.push_back(SpawnClassFromPath(it.key(), it.value().get<double>()));
+					}
+				}
+				if (item.contains("Points") && item["Points"].is_array())
+				{
+					for (const nlohmann::json& point : item["Points"])
+					{
+						if (point.is_array() && point.size() == 3 && point[0].is_number() && point[1].is_number() && point[2].is_number())
+							set.points.push_back({ point[0].get<double>(), point[1].get<double>(), point[2].get<double>() });
+						else
+							warnings.push_back(at + ".Points has an entry that is not [ x, y, z ]; skipped");
+					}
+				}
+				std::vector<std::string> number_warnings;
+				set.target = ReadInt(item, "Target", 1, 1, number_warnings);
+				set.area_radius = ReadInt(item, "AreaRadiusInFoundations", 200, 1, number_warnings) * kFoundation;
+				set.interval_seconds = ReadInt(item, "SpawnIntervalSeconds", 120, 10, number_warnings);
+				for (const std::string& warning : number_warnings)
+					warnings.push_back(at + "." + warning);
+				if (item.contains("BaseLevels"))
+				{
+					const nlohmann::json& levels = item["BaseLevels"];
+					if (levels.is_array() && levels.size() == 2 && levels[0].is_number_integer() && levels[1].is_number_integer() &&
+						levels[0].get<int>() >= 1 && levels[0].get<int>() <= levels[1].get<int>())
+					{
+						set.min_base_level = levels[0].get<int>();
+						set.max_base_level = levels[1].get<int>();
+					}
+					else
+						warnings.push_back(at + ".BaseLevels must be [ min, max ] with 1 <= min <= max; the game picks the level");
+				}
+				if (set.classes.empty() || set.points.empty())
+				{
+					warnings.push_back(at + " (" + set.name + ") needs at least one class in Classes and one point in Points; skipped");
+					continue;
+				}
+				sets.push_back(std::move(set));
+			}
+			return sets;
 		}
 
 		inline MapRules ReadMap(const std::string& name, const nlohmann::json& section, std::vector<std::string>& warnings,
@@ -623,6 +756,9 @@ namespace SpawnControl
 				}
 			}
 
+			if (section.contains("SpawnPoints"))
+				rules.spawn_points = ReadSpawnPoints(section["SpawnPoints"], where + "SpawnPoints", warnings);
+
 			if (section.contains("BlockAreas"))
 				rules.block_areas = ReadAreas(section["BlockAreas"], where + "BlockAreas", warnings);
 			return rules;
@@ -642,7 +778,7 @@ namespace SpawnControl
 		}
 
 		constexpr std::initializer_list<const char*> kMapKeys = { "Block", "Limit", "GroupLimit", "Density", "DensitySkip", "BlockAreas", "Overlap",
-			"UnderMesh", "AutoBlockRepeats", "EnableZones" };
+			"UnderMesh", "AutoBlockRepeats", "EnableZones", "SpawnPoints" };
 
 		// Keys nobody reads are ignored by ARK-style configs without a word; here each one is a warning, with
 		// a hint when the key exists one level up or down.

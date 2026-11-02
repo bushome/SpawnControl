@@ -556,6 +556,24 @@ namespace
 	// Picks the map section and re-resolves every known class against it.
 	void AdjustCounts(int class_index, int delta);
 	void EnableNamedZones(bool search);
+	void RunSpawnPoints();
+
+	// SpawnPoints: per set in the map's rules, what was loaded, counted and spawned since load.
+	struct SpawnSetState
+	{
+		std::vector<UClass*> loaded;       // per class, once loaded
+		std::vector<bool> load_failed;     // per class: its blueprint did not load (said once)
+		int count = 0;                     // its classes in the area at the last census
+		Clock::time_point last_spawn{};
+		bool spawned_once = false;
+		uint64_t spawned = 0;
+		uint64_t failed = 0;
+		std::vector<int> point_ok;         // per point: spawns that worked there
+		std::vector<int> point_failed;     // ...and that the game could not place
+		std::string last;                  // the last spawn, for List
+	};
+	std::vector<SpawnSetState> g_spawn_states;
+	std::mt19937 g_spawn_rng{ std::random_device{}() };
 	template <typename T>
 	T& ZoneField(ANPCZoneManager* zone, const char* name);
 	bool IsZoneManager(AActor* actor, std::unordered_map<UClass*, bool>& known);
@@ -644,6 +662,7 @@ namespace
 		ReadOceanBand();
 		g_auto_block_warned = false;
 		EnableNamedZones(true);
+		g_spawn_states.clear(); // the sets may have changed; counters start again
 		if (g_map_known && !was_known)
 			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);
@@ -1184,6 +1203,7 @@ namespace
 		g_seconds_since_census = 0;
 		RunAutoBlock(); // new areas apply from the next census
 		EnableNamedZones(false);
+		RunSpawnPoints();
 
 		std::vector<ClassRule> rules;
 		rules.reserve(g_classes.size());
@@ -1982,6 +2002,27 @@ namespace
 					<< static_cast<int>(churn.y) << " " << static_cast<int>(churn.z) << ")\n";
 			}
 		}
+		if (g_rules != nullptr && !g_rules->spawn_points.empty())
+		{
+			out << "Spawn points:\n";
+			for (size_t i = 0; i < g_rules->spawn_points.size(); ++i)
+			{
+				const SpawnPointSet& set = g_rules->spawn_points[i];
+				out << "  " << set.name << ": " << (i < g_spawn_states.size() ? g_spawn_states[i].count : 0) << " of target " << set.target
+					<< " within " << static_cast<int>(set.area_radius / kFoundation) << " foundations at the last census";
+				if (i < g_spawn_states.size())
+				{
+					const SpawnSetState& state = g_spawn_states[i];
+					out << "; spawned " << state.spawned << ", failed " << state.failed << " since load";
+					if (!state.last.empty())
+						out << "; last: " << state.last;
+					out << "\n    points:";
+					for (size_t p = 0; p < set.points.size(); ++p)
+						out << (p == 0 ? " " : ", ") << p + 1 << " " << state.point_ok[p] << " ok/" << state.point_failed[p] << " failed";
+				}
+				out << "\n";
+			}
+		}
 		if (g_rules != nullptr && !g_rules->enable_zones.empty())
 		{
 			out << "EnableZones: " << g_enable_zone_list.size() << " of " << g_rules->enable_zones.size() << " named zones found; switched on "
@@ -2493,6 +2534,131 @@ namespace
 			Log::GetLog()->info(g_zones_switched_on == 0 || search ? "EnableZones: switched on {} (it was disabled)"
 				: "EnableZones: {} was disabled again; switched back on", entry.name);
 			++g_zones_switched_on;
+		}
+	}
+
+	// Spawns one creature of a set at one of its points, with the game's own wild spawn.
+	void SpawnFromSet(UWorld* world, const SpawnPointSet& set, SpawnSetState& state)
+	{
+		state.last_spawn = Clock::now();
+		state.spawned_once = true;
+		std::uniform_real_distribution<double> roll(0.0, 1.0);
+		const size_t c = PickWeighted(set.classes, roll(g_spawn_rng));
+		const SpawnClass& spawn_class = set.classes[c];
+		if (state.loaded[c] == nullptr && !state.load_failed[c])
+		{
+			state.loaded[c] = UVictoryCore::BPLoadClass(FString(spawn_class.blueprint.c_str()));
+			if (state.loaded[c] == nullptr)
+			{
+				state.load_failed[c] = true;
+				Log::GetLog()->warn("SpawnPoints \"{}\": cannot load {} ({}); that class is skipped until the next reload", set.name, spawn_class.path,
+					spawn_class.blueprint);
+			}
+		}
+		if (state.loaded[c] == nullptr)
+		{
+			++state.failed;
+			return;
+		}
+		const size_t p = std::uniform_int_distribution<size_t>(0, set.points.size() - 1)(g_spawn_rng);
+		const SpawnPoint& point = set.points[p];
+		const FVector location(point.x, point.y, point.z);
+		const FRotator rotation(0, std::uniform_real_distribution<double>(0.0, 360.0)(g_spawn_rng), 0);
+		const bool set_level = set.min_base_level > 0;
+		const int base_level = set_level ? std::uniform_int_distribution<int>(set.min_base_level, set.max_base_level)(g_spawn_rng) : 0;
+		APrimalDinoCharacter* dino = APrimalDinoCharacter::SpawnDino(world, TSubclassOf<APrimalDinoCharacter>(state.loaded[c]), location, rotation,
+			1.0f, 0, false, set_level, base_level, false, 1.0f, 0, false, true, roll(g_spawn_rng) < 0.5);
+		if (dino == nullptr)
+		{
+			++state.failed;
+			++state.point_failed[p];
+			Log::GetLog()->warn("SpawnPoints \"{}\": the game could not place {} at point {} ({:.0f} {:.0f} {:.0f})", set.name, spawn_class.short_name,
+				p + 1, point.x, point.y, point.z);
+			return;
+		}
+		++state.spawned;
+		++state.point_ok[p];
+		UPrimalCharacterStatusComponent* status = dino->GetCharacterStatusComponent();
+		const int level = status != nullptr ? status->GetCharacterLevel() : 0;
+		state.last = spawn_class.short_name + " level " + std::to_string(level) + " at point " + std::to_string(p + 1);
+		Log::GetLog()->info("SpawnPoints \"{}\": spawned {} ({} of target {} in the area before it)", set.name, state.last, state.count, set.target);
+	}
+
+	// After each census: count each set's classes in its area (wild, summoned included: what SpawnControl
+	// spawns counts as summoned) and spawn one more where it is short, no faster than its interval.
+	void RunSpawnPoints()
+	{
+		if (g_rules == nullptr || g_rules->spawn_points.empty())
+			return;
+		UWorld* world = World();
+		if (world == nullptr)
+			return;
+		const std::vector<SpawnPointSet>& sets = g_rules->spawn_points;
+		if (g_spawn_states.size() != sets.size())
+		{
+			g_spawn_states.assign(sets.size(), SpawnSetState());
+			for (size_t i = 0; i < sets.size(); ++i)
+			{
+				g_spawn_states[i].loaded.assign(sets[i].classes.size(), nullptr);
+				g_spawn_states[i].load_failed.assign(sets[i].classes.size(), false);
+				g_spawn_states[i].point_ok.assign(sets[i].points.size(), 0);
+				g_spawn_states[i].point_failed.assign(sets[i].points.size(), 0);
+			}
+		}
+		std::vector<FVector> centres;
+		for (const SpawnPointSet& set : sets)
+		{
+			FVector centre(0, 0, 0);
+			for (const SpawnPoint& point : set.points)
+				centre += FVector(point.x, point.y, point.z);
+			centres.push_back(centre / static_cast<double>(set.points.size()));
+		}
+		std::vector<int> counts(sets.size(), 0);
+		UClass* dino_class = APrimalDinoCharacter::GetPrivateStaticClass();
+		auto& levels = world->LevelsField();
+		for (int32 l = 0; l < levels.Num(); ++l)
+		{
+			ULevel* level = levels[l].Get();
+			if (level == nullptr)
+				continue;
+			TArray<AActor*>& actors = *GetNativePointerField<TArray<AActor*>*>(level, kLevelActorsField);
+			for (int a = 0; a < actors.Num(); ++a)
+			{
+				AActor* actor = actors[a];
+				if (actor == nullptr || !actor->IsA(dino_class))
+					continue;
+				APrimalDinoCharacter* dino = static_cast<APrimalDinoCharacter*>(actor);
+				const Kind kind = Classify(dino);
+				if (kind == Kind::Other || kind == Kind::Mission)
+					continue;
+				const std::string& name = g_classes[ClassIndexFor(reinterpret_cast<UObject*>(dino)->ClassField())].info.short_name;
+				const FVector location = dino->GetLocation();
+				for (size_t i = 0; i < sets.size(); ++i)
+				{
+					const FVector offset = location - centres[i];
+					if (offset.X * offset.X + offset.Y * offset.Y + offset.Z * offset.Z > sets[i].area_radius * sets[i].area_radius)
+						continue;
+					for (const SpawnClass& spawn_class : sets[i].classes)
+					{
+						if (EqualsNoCase(name, spawn_class.short_name))
+						{
+							++counts[i];
+							break;
+						}
+					}
+				}
+			}
+		}
+		for (size_t i = 0; i < sets.size(); ++i)
+		{
+			SpawnSetState& state = g_spawn_states[i];
+			state.count = counts[i];
+			if (counts[i] >= sets[i].target)
+				continue;
+			if (state.spawned_once &&
+				std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - state.last_spawn).count() < sets[i].interval_seconds)
+				continue;
+			SpawnFromSet(world, sets[i], state);
 		}
 	}
 
