@@ -2655,8 +2655,12 @@ namespace
 			state.count = counts[i];
 			if (counts[i] >= sets[i].target)
 				continue;
+			// Spawns happen only right after a census, so an interval measured to the second would often miss the
+			// census it was meant for and wait a whole census more: a quarter of it (at most 30 s) is allowed early.
+			const int interval = sets[i].interval_seconds;
+			const int slack = (std::min)(30, interval / 4);
 			if (state.spawned_once &&
-				std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - state.last_spawn).count() < sets[i].interval_seconds)
+				std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - state.last_spawn).count() < interval - slack)
 				continue;
 			SpawnFromSet(world, sets[i], state);
 		}
