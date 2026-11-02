@@ -27,6 +27,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <deque>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -2435,19 +2436,7 @@ namespace
 		return is_zone;
 	}
 
-	// Distance from a point to an actor's bounding box (0 inside), and the box's size.
-	double DistanceToBounds(AActor* actor, const FVector& at, FVector& size)
-	{
-		FVector origin{}, extent{};
-		actor->GetActorBounds(false, &origin, &extent, false);
-		size = FVector(extent.X * 2, extent.Y * 2, extent.Z * 2);
-		const double dx = (std::max)(0.0, std::abs(at.X - origin.X) - extent.X);
-		const double dy = (std::max)(0.0, std::abs(at.Y - origin.Y) - extent.Y);
-		const double dz = (std::max)(0.0, std::abs(at.Z - origin.Z) - extent.Z);
-		return std::sqrt(dx * dx + dy * dy + dz * dz);
-	}
-
-	std::string ZonesHereText(const FVector& at, int radius_foundations)
+	std::string ZonesHereText(const FVector& at, int radius_foundations, const std::string& filter)
 	{
 		UWorld* world = World();
 		if (world == nullptr)
@@ -2455,14 +2444,38 @@ namespace
 		const double radius = radius_foundations * kFoundation;
 		const auto fdn = [](double units) { std::ostringstream o; o << std::fixed << std::setprecision(1) << units / kFoundation; return o.str(); };
 		const auto on = [](bool value) { return value ? "on" : "off"; };
+		const auto lower = [](std::string text) { for (char& ch : text) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); return text; };
+		const std::string wanted = lower(filter);
+
+		struct Box
+		{
+			FVector origin{}, extent{};
+		};
 		struct Row
 		{
-			double distance = 0;
-			std::string text;
+			ANPCZoneManager* zone = nullptr;
+			double distance = 0;           // to its nearest spawn volume (zone volumes when it has none)
+			std::vector<Box> spawn_boxes;
+			FVector biggest{};
+			int zone_volumes = 0;
+			std::map<std::string, int> inside; // wild creatures inside its spawn volumes now, by class
+			int inside_total = 0;
 		};
 		std::vector<Row> rows;
 		std::unordered_map<UClass*, bool> known;
 		size_t zones_seen = 0;
+		const auto distance_to = [&](const Box& box) {
+			const double dx = (std::max)(0.0, std::abs(at.X - box.origin.X) - box.extent.X);
+			const double dy = (std::max)(0.0, std::abs(at.Y - box.origin.Y) - box.extent.Y);
+			const double dz = (std::max)(0.0, std::abs(at.Z - box.origin.Z) - box.extent.Z);
+			return std::sqrt(dx * dx + dy * dy + dz * dz);
+		};
+		const auto bounds_of = [](AActor* actor) {
+			Box box;
+			actor->GetActorBounds(false, &box.origin, &box.extent, false);
+			return box;
+		};
+
 		auto& levels = world->LevelsField();
 		for (int32 l = 0; l < levels.Num(); ++l)
 		{
@@ -2477,100 +2490,140 @@ namespace
 					continue;
 				++zones_seen;
 				ANPCZoneManager* zone = reinterpret_cast<ANPCZoneManager*>(actor);
-
-				// Where it spawns (spawn volumes) and where it counts its creatures (zone volumes).
-				double nearest = (std::numeric_limits<double>::max)();
-				double nearest_spawn = (std::numeric_limits<double>::max)();
-				FVector biggest{};
+				if (!wanted.empty())
+				{
+					bool match = lower(ObjectName(zone)).find(wanted) != std::string::npos;
+					TArray<FNPCSpawnEntry>& entries = zone->NPCSpawnEntriesField();
+					for (int e = 0; e < entries.Num() && !match; ++e)
+						match = lower(entries[e].AnEntryName.ToString()).find(wanted) != std::string::npos;
+					if (!match)
+						continue;
+				}
+				Row row;
+				row.zone = zone;
+				row.distance = (std::numeric_limits<double>::max)();
 				auto& spawn_volumes = ZoneField<TArray<FLinkedZoneSpawnVolumeEntry>>(zone, "LinkedZoneSpawnVolumeEntries");
-				int spawn_count = 0;
 				for (int v = 0; v < spawn_volumes.Num() && v < 64; ++v)
 				{
 					AActor* volume = reinterpret_cast<AActor*>(spawn_volumes[v].LinkedZoneSpawnVolume);
 					if (volume == nullptr)
 						continue;
-					++spawn_count;
-					FVector size{};
-					const double d = DistanceToBounds(volume, at, size);
-					nearest_spawn = (std::min)(nearest_spawn, d);
-					if (size.X * size.Y * size.Z > biggest.X * biggest.Y * biggest.Z)
-						biggest = size;
+					const Box box = bounds_of(volume);
+					row.spawn_boxes.push_back(box);
+					row.distance = (std::min)(row.distance, distance_to(box));
+					if (box.extent.X * box.extent.Y * box.extent.Z > row.biggest.X * row.biggest.Y * row.biggest.Z / 8)
+						row.biggest = FVector(box.extent.X * 2, box.extent.Y * 2, box.extent.Z * 2);
 				}
 				auto& zone_volumes = ZoneField<TArray<AActor*>>(zone, "LinkedZoneVolumes");
-				int zone_count = 0;
-				double nearest_zone = (std::numeric_limits<double>::max)();
 				for (int v = 0; v < zone_volumes.Num() && v < 64; ++v)
 				{
 					if (zone_volumes[v] == nullptr)
 						continue;
-					++zone_count;
-					FVector size{};
-					nearest_zone = (std::min)(nearest_zone, DistanceToBounds(zone_volumes[v], at, size));
+					++row.zone_volumes;
+					if (row.spawn_boxes.empty()) // zone volumes span whole oceans: only a fallback for distance
+						row.distance = (std::min)(row.distance, distance_to(bounds_of(zone_volumes[v])));
 				}
-				nearest = (std::min)(nearest_spawn, nearest_zone);
-				if (nearest > radius)
-					continue;
-
-				std::ostringstream out;
-				const bool enabled = ZoneField<bool>(zone, "bEnabled");
-				out << ObjectName(zone) << " (" << fdn(nearest) << " fdn away" << (enabled ? "" : "; DISABLED")
-					<< (ZoneField<bool>(zone, "bIsCaveManager") ? "; cave manager" : "") << (ZoneField<bool>(zone, "bUsesManualSpawning") ? "; manual spawning" : "")
-					<< ")\n";
-				out << "    live " << ZoneField<int>(zone, "NumNPCSpawned") << " of target " << ZoneField<int>(zone, "UseDesiredNumberOfNPC")
-					<< " (MinDesired " << ZoneField<int>(zone, "MinDesiredNumberOfNPC") << ", Max " << ZoneField<int>(zone, "MaxNumberOfNPC")
-					<< ", multiplier " << ZoneField<float>(zone, "DesiredNumberOfNPCMultiplier") << "); spawn failures "
-					<< ZoneField<int>(zone, "NumSpawnFailures") << (ZoneField<bool>(zone, "bPrintedFailureToSpawnMessage") ? " (game logged a failure to spawn)" : "")
-					<< "\n";
-
-				const auto calls = g_zone_calls.find(zone);
-				const auto churn = g_zone_churn.find(zone);
-				const auto stats = g_zone_stats.find(zone);
-				out << "    SpawnControl: " << (calls != g_zone_calls.end() ? calls->second.calls : 0) << " spawn passes since load ("
-					<< (calls != g_zone_calls.end() ? calls->second.returned_true : 0) << " returned true), "
-					<< (churn != g_zone_churn.end() ? churn->second.spawned : 0) << " creatures arrived ("
-					<< (churn != g_zone_churn.end() ? churn->second.removed : 0) << " removed for limits)"
-					<< (churn != g_zone_churn.end() && churn->second.holding ? "; HELD for churn" : "")
-					<< (stats != g_zone_stats.end() && stats->second.stopped ? std::string("; STOPPED (") + (stats->second.by_mesh ? "under the mesh" : stats->second.area) + ")" : "")
-					<< "\n";
-
-				out << "    spawn volumes " << spawn_count;
-				if (spawn_count > 0)
-					out << " (nearest " << fdn(nearest_spawn) << " fdn; largest " << fdn(biggest.X) << " x " << fdn(biggest.Y) << " x " << fdn(biggest.Z) << " fdn)";
-				out << ", zone volumes " << zone_count << ", spawn point overrides " << ZoneField<TArray<AActor*>>(zone, "SpawnPointOverrides").Num() << "\n";
-				out << "    placement: " << ZoneField<int>(zone, "MaxNumberSpawnZoneRandomPointChecks") << " random point checks; extent test "
-					<< on(ZoneField<bool>(zone, "bAllowExtentTest")) << ", overlap check " << on(ZoneField<bool>(zone, "bUseSpawnOverlapCheck"))
-					<< ", blocking check " << on(ZoneField<bool>(zone, "bUseSpawnBlockingCheck")) << ", pawn blocking " << on(ZoneField<bool>(zone, "bUseSpawnPawnBlockingCheck"))
-					<< ", trace for points " << on(ZoneField<bool>(zone, "bTraceForSpawnPoints"))
-					<< (ZoneField<bool>(zone, "bNeverSpawnInWater") ? ", never in water" : "") << (ZoneField<bool>(zone, "bOnlySpawnInWater") ? ", only in water" : "")
-					<< "; min distance from players " << fdn(ZoneField<float>(zone, "TheMinimumPlayerDistanceFromSpawnPoint")) << " fdn, structures "
-					<< fdn(ZoneField<float>(zone, "TheMinimumStructureDistanceFromSpawnPoint")) << " fdn, tames "
-					<< fdn(ZoneField<float>(zone, "TheMinimumTamedDinoDistanceFromSpawnPoint")) << " fdn\n";
-
-				TArray<FNPCSpawnEntry>& entries = zone->NPCSpawnEntriesField();
-				out << "    entries " << entries.Num() << ":";
-				for (int e = 0; e < entries.Num() && e < 12; ++e)
-				{
-					FNPCSpawnEntry& entry = entries[e];
-					std::string classes;
-					for (int c = 0; c < entry.NPCsToSpawn.Num() && c < 4; ++c)
-					{
-						UObject* loaded = reinterpret_cast<FWeakObjectPtr*>(&entry.NPCsToSpawn[c])->Get(false);
-						classes += (c == 0 ? "" : ", ") + (loaded != nullptr ? loaded->NameField().ToString().ToString() : std::string("(not loaded)"));
-					}
-					if (entry.NPCsToSpawn.Num() > 4)
-						classes += ", ...";
-					out << (e == 0 ? " " : "; ") << "\"" << entry.AnEntryName.ToString() << "\" w" << entry.EntryWeight << " [" << classes << "]";
-				}
-				out << (entries.Num() > 12 ? "; ..." : "") << "\n";
-				rows.push_back({ nearest, out.str() });
+				if (row.distance <= radius)
+					rows.push_back(std::move(row));
 			}
 		}
 		std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.distance < b.distance; });
+		constexpr size_t kShown = 12;
+		if (rows.size() > kShown)
+			rows.resize(kShown);
+
+		// What is actually inside each shown zone's spawn volumes now.
+		UClass* dino_class = APrimalDinoCharacter::GetPrivateStaticClass();
+		for (int32 l = 0; l < levels.Num() && !rows.empty(); ++l)
+		{
+			ULevel* level = levels[l].Get();
+			if (level == nullptr)
+				continue;
+			TArray<AActor*>& actors = *GetNativePointerField<TArray<AActor*>*>(level, kLevelActorsField);
+			for (int a = 0; a < actors.Num(); ++a)
+			{
+				AActor* actor = actors[a];
+				if (actor == nullptr || !actor->IsA(dino_class))
+					continue;
+				APrimalDinoCharacter* dino = static_cast<APrimalDinoCharacter*>(actor);
+				const Kind kind = Classify(dino);
+				if (kind == Kind::Other || kind == Kind::Mission)
+					continue;
+				const FVector p = dino->GetLocation();
+				for (Row& row : rows)
+				{
+					for (const Box& box : row.spawn_boxes)
+					{
+						if (std::abs(p.X - box.origin.X) <= box.extent.X && std::abs(p.Y - box.origin.Y) <= box.extent.Y &&
+							std::abs(p.Z - box.origin.Z) <= box.extent.Z)
+						{
+							++row.inside[g_classes[ClassIndexFor(static_cast<UClass*>(reinterpret_cast<UObject*>(dino)->ClassField()))].info.short_name];
+							++row.inside_total;
+							break;
+						}
+					}
+				}
+			}
+		}
+
 		std::ostringstream text;
-		text << "Spawn zones within " << radius_foundations << " foundations of " << static_cast<int>(at.X) << " " << static_cast<int>(at.Y) << " "
-			<< static_cast<int>(at.Z) << ": " << rows.size() << " of " << zones_seen << " zones on the map" << (rows.size() > 10 ? " (nearest 10 shown)" : "") << "\n";
-		for (size_t i = 0; i < rows.size() && i < 10; ++i)
-			text << rows[i].text;
+		text << "Spawn zones with spawn volumes within " << radius_foundations << " foundations of " << static_cast<int>(at.X) << " "
+			<< static_cast<int>(at.Y) << " " << static_cast<int>(at.Z) << (wanted.empty() ? std::string() : " matching \"" + filter + "\"") << ": "
+			<< rows.size() << " shown of " << zones_seen << " zones on the map\n";
+		for (const Row& row : rows)
+		{
+			ANPCZoneManager* zone = row.zone;
+			text << ObjectName(zone) << " (" << fdn(row.distance) << " fdn away" << (ZoneField<bool>(zone, "bEnabled") ? "" : "; DISABLED")
+				<< (ZoneField<bool>(zone, "bIsCaveManager") ? "; cave manager" : "") << (ZoneField<bool>(zone, "bUsesManualSpawning") ? "; manual spawning" : "")
+				<< ")\n";
+			text << "    target " << ZoneField<int>(zone, "UseDesiredNumberOfNPC") << " (MinDesired " << ZoneField<int>(zone, "MinDesiredNumberOfNPC")
+				<< ", Max " << ZoneField<int>(zone, "MaxNumberOfNPC") << ", multiplier " << ZoneField<float>(zone, "DesiredNumberOfNPCMultiplier")
+				<< "); game counters: spawned " << ZoneField<int>(zone, "NumNPCSpawned") << ", spawn failures " << ZoneField<int>(zone, "NumSpawnFailures")
+				<< (ZoneField<bool>(zone, "bPrintedFailureToSpawnMessage") ? " (game logged a failure to spawn)" : "") << "\n";
+			text << "    inside its spawn volumes now: " << row.inside_total << " wild";
+			int listed = 0;
+			std::vector<std::pair<int, std::string>> by_count;
+			for (const auto& [name, count] : row.inside)
+				by_count.emplace_back(count, name);
+			std::sort(by_count.rbegin(), by_count.rend());
+			for (const auto& [count, name] : by_count)
+			{
+				if (listed++ == 6)
+				{
+					text << ", ...";
+					break;
+				}
+				text << (listed == 1 ? " (" : ", ") << count << " " << name;
+			}
+			text << (listed > 0 ? ")" : "") << "\n";
+			const auto calls = g_zone_calls.find(zone);
+			const auto churn = g_zone_churn.find(zone);
+			const auto stats = g_zone_stats.find(zone);
+			text << "    SpawnControl: " << (calls != g_zone_calls.end() ? calls->second.calls : 0) << " spawn passes since load ("
+				<< (calls != g_zone_calls.end() ? calls->second.returned_true : 0) << " returned true), "
+				<< (churn != g_zone_churn.end() ? churn->second.spawned : 0) << " creatures arrived ("
+				<< (churn != g_zone_churn.end() ? churn->second.removed : 0) << " removed for limits)"
+				<< (churn != g_zone_churn.end() && churn->second.holding ? "; HELD for churn" : "")
+				<< (stats != g_zone_stats.end() && stats->second.stopped ? std::string("; STOPPED (") + (stats->second.by_mesh ? "under the mesh" : stats->second.area) + ")" : "")
+				<< "\n";
+			text << "    spawn volumes " << row.spawn_boxes.size();
+			if (!row.spawn_boxes.empty())
+				text << " (largest " << fdn(row.biggest.X) << " x " << fdn(row.biggest.Y) << " x " << fdn(row.biggest.Z) << " fdn)";
+			text << ", zone volumes " << row.zone_volumes << ", spawn point overrides " << ZoneField<TArray<AActor*>>(zone, "SpawnPointOverrides").Num() << "\n";
+			text << "    placement: " << ZoneField<int>(zone, "MaxNumberSpawnZoneRandomPointChecks") << " random point checks; extent test "
+				<< on(ZoneField<bool>(zone, "bAllowExtentTest")) << ", overlap check " << on(ZoneField<bool>(zone, "bUseSpawnOverlapCheck"))
+				<< ", blocking check " << on(ZoneField<bool>(zone, "bUseSpawnBlockingCheck")) << ", pawn blocking " << on(ZoneField<bool>(zone, "bUseSpawnPawnBlockingCheck"))
+				<< ", trace for points " << on(ZoneField<bool>(zone, "bTraceForSpawnPoints"))
+				<< (ZoneField<bool>(zone, "bNeverSpawnInWater") ? ", never in water" : "") << (ZoneField<bool>(zone, "bOnlySpawnInWater") ? ", only in water" : "")
+				<< "; min distance from players " << fdn(ZoneField<float>(zone, "TheMinimumPlayerDistanceFromSpawnPoint")) << " fdn, structures "
+				<< fdn(ZoneField<float>(zone, "TheMinimumStructureDistanceFromSpawnPoint")) << " fdn, tames "
+				<< fdn(ZoneField<float>(zone, "TheMinimumTamedDinoDistanceFromSpawnPoint")) << " fdn\n";
+			TArray<FNPCSpawnEntry>& entries = zone->NPCSpawnEntriesField();
+			text << "    entries " << entries.Num() << ":";
+			for (int e = 0; e < entries.Num() && e < 12; ++e)
+				text << (e == 0 ? " " : "; ") << "\"" << entries[e].AnEntryName.ToString() << "\" w" << entries[e].EntryWeight;
+			text << (entries.Num() > 12 ? "; ..." : "") << "\n";
+		}
 		return text.str();
 	}
 
@@ -2579,18 +2632,18 @@ namespace
 		if (AShooterPlayerController* admin = AdminFrom(controller))
 		{
 			int radius = 30;
-			const std::string argument = CommandArgument(command);
-			if (!argument.empty())
+			std::string filter;
+			std::istringstream words(CommandArgument(command));
+			std::string word;
+			while (words >> word)
 			{
-				try
-				{
-					radius = (std::max)(1, (std::min)(std::stoi(argument), 300));
-				}
-				catch (const std::exception&)
-				{
-				}
+				bool number = !word.empty() && std::all_of(word.begin(), word.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
+				if (number && word.size() < 6)
+					radius = (std::max)(1, (std::min)(std::stoi(word), 300));
+				else
+					filter = word;
 			}
-			const std::string text = ZonesHereText(AsaApi::IApiUtils::GetPosition(admin), radius);
+			const std::string text = ZonesHereText(AsaApi::IApiUtils::GetPosition(admin), radius, filter);
 			Log::GetLog()->info("Zones:\n{}", text);
 			SendAdmin(admin, text);
 		}
