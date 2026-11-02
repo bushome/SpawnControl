@@ -33,7 +33,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <deque>
-#include <cstdio>
+#include <charconv>
 #include <fstream>
 #include <iterator>
 #include <random>
@@ -994,8 +994,15 @@ namespace
 				continue;
 			++auto_now;
 			int number = 0;
-			if (std::sscanf(area.name.c_str(), "Auto %d", &number) == 1 && number >= next_number)
-				next_number = number + 1;
+			// "Auto N <class>": read N (std::from_chars, since this project rejects sscanf as unsafe)
+			if (area.name.rfind("Auto ", 0) == 0)
+			{
+				const char* first = area.name.c_str() + 5;
+				const char* last = area.name.c_str() + area.name.size();
+				const auto [end, error] = std::from_chars(first, last, number);
+				if (error == std::errc() && end != first && number >= next_number)
+					next_number = number + 1;
+			}
 		}
 		const std::vector<RemovalPoint> points(g_mesh_removal_points.begin(), g_mesh_removal_points.end());
 		const std::vector<RepeatSpot> spots = AutoBlockSpots(points, kRepeatSpotReach, g_rules->auto_block, g_rules->block_areas, auto_now);
