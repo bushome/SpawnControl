@@ -882,6 +882,13 @@ static void TestAutoBlock()
 	CHECK(AnyContains(bad.warnings, "Maps.A.AutoBlockRepeats.Radius is not a known setting"));
 	CHECK(AnyContains(bad.warnings, "Maps.B.AutoBlockRepeats must be an object"));
 
+	// EnableZones: a list of zone names; a list replaces Default's like any other.
+	const Settings zones = ParseConfigText(R"({ "Default": { "EnableZones": [ "Zone_A" ] },
+		"Maps": { "A": {}, "B": { "EnableZones": [ "Zone_B", "Zone_C" ] }, "C": { "EnableZones": "Zone_D" } } })");
+	CHECK(zones.maps[0].enable_zones == std::vector<std::string>{ "Zone_A" });
+	CHECK((zones.maps[1].enable_zones == std::vector<std::string>{ "Zone_B", "Zone_C" }));
+	CHECK(zones.maps[2].enable_zones.empty() && AnyContains(zones.warnings, "Maps.C.EnableZones must be a list"));   // replaced Default's, then ignored
+
 	// Six removals on one spot become one area; disabled, full or too wide gives none.
 	std::vector<RemovalPoint> points;
 	for (int i = 0; i < 6; ++i)

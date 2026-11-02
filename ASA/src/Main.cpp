@@ -555,6 +555,20 @@ namespace
 
 	// Picks the map section and re-resolves every known class against it.
 	void AdjustCounts(int class_index, int delta);
+	void EnableNamedZones(bool search);
+	template <typename T>
+	T& ZoneField(ANPCZoneManager* zone, const char* name);
+	bool IsZoneManager(AActor* actor, std::unordered_map<UClass*, bool>& known);
+
+	// EnableZones: zones the map has switched off, switched back on (found once per load, checked each census).
+	struct EnabledZone
+	{
+		ANPCZoneManager* zone = nullptr;
+		std::string name;
+	};
+	std::vector<EnabledZone> g_enable_zone_list;
+	uint64_t g_zones_switched_on = 0;   // times a listed zone was found off and switched on, since load
+	std::unordered_map<UClass*, bool> g_zone_class_known;
 
 	// "AsaGen1OceanBand": { "Remove": false } in the GenesisSimulation section (its own file, not Default).
 	// The shared parser does not know the key; ReloadSettings drops its unknown-key warning for map sections.
@@ -629,6 +643,7 @@ namespace
 		}
 		ReadOceanBand();
 		g_auto_block_warned = false;
+		EnableNamedZones(true);
 		if (g_map_known && !was_known)
 			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);
@@ -1168,6 +1183,7 @@ namespace
 		g_band_seen_building.clear();
 		g_seconds_since_census = 0;
 		RunAutoBlock(); // new areas apply from the next census
+		EnableNamedZones(false);
 
 		std::vector<ClassRule> rules;
 		rules.reserve(g_classes.size());
@@ -1966,6 +1982,13 @@ namespace
 					<< static_cast<int>(churn.y) << " " << static_cast<int>(churn.z) << ")\n";
 			}
 		}
+		if (g_rules != nullptr && !g_rules->enable_zones.empty())
+		{
+			out << "EnableZones: " << g_enable_zone_list.size() << " of " << g_rules->enable_zones.size() << " named zones found; switched on "
+				<< g_zones_switched_on << " time(s) since load\n";
+			for (const EnabledZone& entry : g_enable_zone_list)
+				out << "  " << entry.name << ": " << (ZoneField<bool>(entry.zone, "bEnabled") ? "enabled" : "DISABLED") << "\n";
+		}
 		if (g_ocean_band.enabled)
 		{
 			out << "Genesis ocean band (" << (g_ocean_band.remove ? "removing" : "report only") << "; Z " << static_cast<int>(kBandBottomZ)
@@ -2418,6 +2441,59 @@ namespace
 	T& ZoneField(ANPCZoneManager* zone, const char* name)
 	{
 		return *GetNativePointerField<T*>(zone, (std::string("ANPCZoneManager.") + name).c_str());
+	}
+
+	// Finds the zones EnableZones names (search, once the world exists) and switches any that are off back on.
+	// Checked again after every census: if something keeps disabling a zone, the log shows it each time.
+	void EnableNamedZones(bool search)
+	{
+		if (search)
+		{
+			g_enable_zone_list.clear();
+			UWorld* world = World();
+			if (g_rules == nullptr || g_rules->enable_zones.empty() || world == nullptr)
+				return;
+			std::vector<bool> found(g_rules->enable_zones.size(), false);
+			auto& levels = world->LevelsField();
+			for (int32 l = 0; l < levels.Num(); ++l)
+			{
+				ULevel* level = levels[l].Get();
+				if (level == nullptr)
+					continue;
+				TArray<AActor*>& actors = *GetNativePointerField<TArray<AActor*>*>(level, kLevelActorsField);
+				for (int a = 0; a < actors.Num(); ++a)
+				{
+					AActor* actor = actors[a];
+					if (actor == nullptr || !IsZoneManager(actor, g_zone_class_known))
+						continue;
+					ANPCZoneManager* zone = reinterpret_cast<ANPCZoneManager*>(actor);
+					const std::string name = ObjectName(zone);
+					for (size_t i = 0; i < g_rules->enable_zones.size(); ++i)
+					{
+						if (!found[i] && EqualsNoCase(name, g_rules->enable_zones[i]))
+						{
+							found[i] = true;
+							g_enable_zone_list.push_back({ zone, name });
+						}
+					}
+				}
+			}
+			for (size_t i = 0; i < found.size(); ++i)
+			{
+				if (!found[i])
+					Log::GetLog()->warn("EnableZones: no spawn zone named {} on this map", g_rules->enable_zones[i]);
+			}
+		}
+		for (const EnabledZone& entry : g_enable_zone_list)
+		{
+			bool& enabled = ZoneField<bool>(entry.zone, "bEnabled");
+			if (enabled)
+				continue;
+			enabled = true;
+			Log::GetLog()->info(g_zones_switched_on == 0 || search ? "EnableZones: switched on {} (it was disabled)"
+				: "EnableZones: {} was disabled again; switched back on", entry.name);
+			++g_zones_switched_on;
+		}
 	}
 
 	bool IsZoneManager(AActor* actor, std::unordered_map<UClass*, bool>& known)

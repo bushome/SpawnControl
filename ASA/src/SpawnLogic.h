@@ -281,6 +281,9 @@ namespace SpawnControl
 		std::vector<DensityRule> density;
 		DensitySkip density_skip;
 		std::vector<BlockArea> block_areas;
+		// Spawn zones (by object name, as SpawnControl.Zones prints them) to switch on when the map has them
+		// disabled. Checked again after every census.
+		std::vector<std::string> enable_zones;
 		OverlapRule overlap;
 		UnderMeshRule under_mesh;
 		AutoBlockRule auto_block;
@@ -594,6 +597,8 @@ namespace SpawnControl
 				}
 			}
 
+			rules.enable_zones = ReadStrings(section, "EnableZones", rules.enable_zones, warnings, where);
+
 			if (section.contains("AutoBlockRepeats"))
 			{
 				const nlohmann::json& auto_block = section["AutoBlockRepeats"];
@@ -637,7 +642,7 @@ namespace SpawnControl
 		}
 
 		constexpr std::initializer_list<const char*> kMapKeys = { "Block", "Limit", "GroupLimit", "Density", "DensitySkip", "BlockAreas", "Overlap",
-			"UnderMesh", "AutoBlockRepeats" };
+			"UnderMesh", "AutoBlockRepeats", "EnableZones" };
 
 		// Keys nobody reads are ignored by ARK-style configs without a word; here each one is a warning, with
 		// a hint when the key exists one level up or down.
