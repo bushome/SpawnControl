@@ -9,16 +9,19 @@
       |_|
 ```
 Server plugin that keeps wild creature populations in check, per map: classes that never spawn, a maximum
-count per class, and shared maximums for groups of classes (a creature and its modded variant). Only wild
-creatures are touched. Tamed and player-owned creatures, and creatures that belong to a mission or outpost,
-are left alone. Removals are spread out a few per second, farthest from players first, so a large cull never
-lands in one server tick.
+count per class, shared maximums for groups of classes, and caps on clumps and creatures spawned inside one
+another. It finds creatures stuck under or inside the map with the game's own test and stops the spawn points
+that keep producing them. Only wild creatures are touched: tamed and player-owned creatures, and creatures
+that belong to a mission or outpost, are left alone. Removals are spread out a few per second, farthest from
+players first, so a large cull never lands in one server tick, and spawn zones are steered away from classes
+that are already full instead of feeding the removal queue.
 
-An optional rolling refresh replaces wild creatures a few at a time, oldest first and never near players, so
-the zones respawn them with fresh levels without a full dino wipe.
+On ASA it can also switch disabled spawn zones back on and spawn creatures where a map's own zones never do.
 
-Status: running on an ASA test server with a copy of a live Lost Colony save. Census, rules, zone-level refusal
-of full spawn entries, removal queue, rolling refresh (not yet tested) and the `List`/`Reload` commands are in; per-zone caps, mesh detection, spawners and the geometry probe are planned next.
+Status: running on a live ASA cluster and in first deployment on an ASE cluster.
+
+**Documentation:** [`docs/`](docs/README.md) covers how it works, every setting, the commands and how to tune
+a map. [`tools/Make-Limits.ps1`](tools/Make-Limits.ps1) turns a `ListDinos` survey into `Limit` entries.
 
 | Folder | Game | Server API (submodule) | Map section picked by |
 |---|---|---|---|
@@ -38,4 +41,5 @@ git submodule update --init --recursive
 ```
 
 The rule logic (`src/SpawnLogic.h`), the tests and the configs are the same in both folders; only
-`src/Main.cpp` and the project files differ by API. Build and install steps are in each folder's README.
+`src/Main.cpp` and the project files differ by API. Build and install steps are in each folder's README;
+what each build supports is in [ASA and ASE differences](docs/asa-vs-ase.md).
