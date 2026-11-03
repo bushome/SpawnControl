@@ -43,3 +43,8 @@ git submodule update --init --recursive
 The rule logic (`src/SpawnLogic.h`), the tests and the configs are the same in both folders; only
 `src/Main.cpp` and the project files differ by API. Build and install steps are in each folder's README;
 what each build supports is in [ASA and ASE differences](docs/asa-vs-ase.md).
+
+## Development
+
+Developed with AI assistance (Claude). Every change was reviewed and tested on a dedicated test server
+before going live.
