@@ -7,6 +7,7 @@
 
 - [Diagnosing a zone: SpawnControl.Zones](#diagnosing-a-zone-spawncontrolzones)
 - [EnableZones](#enablezones)
+- [DisableZones](#disablezones)
 - [SpawnPoints](#spawnpoints)
 - [Worked example: a cave that never spawned wyverns](#worked-example-a-cave-that-never-spawned-wyverns)
 
@@ -46,6 +47,26 @@ maps have zones switched off, so they never spawn, whatever the ini spawn entrie
 the state appears to persist in the save. SpawnControl finds them on load and switches them on, then checks again after every census and
 switches back on any that something disabled again, logging each time. A name not found on the map is a
 warning. `List` shows each one's state.
+
+## DisableZones
+
+```json
+"DisableZones": [ "NPCZoneManager_UAID_..." ]
+```
+
+The opposite of `EnableZones`: spawn zones to switch off, by the same names, kept off after every census. A
+name in both lists is switched off, with a config warning. `List` shows each named zone, its state and the state
+SpawnControl keeps it in. A disabled zone makes no spawn passes at all (`Zones` shows `0 spawn passes`).
+
+The case it was built for: water-only zones (`only in water` in `Zones`) whose spawn volume is mostly land.
+Each pass runs up to 40 random point checks with traces and fails, about every 14 seconds, forever. On Lost
+Colony, five of them around the city plaza had over 3 million failures each and `spawned 0`, and standing among
+them gave server FPS dips into the teens; a river with working water zones did not. `List`'s **Failing zones**
+section finds these for you (see [Reading List](commands.md#reading-spawncontrollist)) with a location to go
+and look. By hand: look for zones with a huge
+`spawn failures` count, `spawned 0` and `only in water`, and run `Zones` twice a few minutes apart: if the
+failures rise by the number of passes, the zone never succeeds. Switching it off also removes whatever it
+would have spawned; put those back with [SpawnPoints](#spawnpoints) if needed.
 
 ## SpawnPoints
 

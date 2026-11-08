@@ -216,6 +216,8 @@ namespace
 	{
 		uint64_t calls = 0;
 		uint64_t returned_true = 0;
+		int64_t base_failures = 0;  // the game's counters at its first pass since load (they may come from the save)
+		int64_t base_spawned = 0;
 	};
 	std::unordered_map<ANPCZoneManager*, ZoneCalls> g_zone_calls;
 
@@ -578,14 +580,15 @@ namespace
 	T& ZoneField(ANPCZoneManager* zone, const char* name);
 	bool IsZoneManager(AActor* actor, std::unordered_map<UClass*, bool>& known);
 
-	// EnableZones: zones the map has switched off, switched back on (found once per load, checked each census).
+	// EnableZones / DisableZones: named zones kept switched on or off (found once per load, checked each census).
 	struct EnabledZone
 	{
 		ANPCZoneManager* zone = nullptr;
 		std::string name;
+		bool on = true;   // the state SpawnControl keeps it in
 	};
 	std::vector<EnabledZone> g_enable_zone_list;
-	uint64_t g_zones_switched_on = 0;   // times a listed zone was found off and switched on, since load
+	uint64_t g_zones_switched_on = 0;   // times a listed zone was found in the wrong state and switched, since load
 	std::unordered_map<UClass*, bool> g_zone_class_known;
 
 	// "AsaGen1OceanBand": { "Remove": false } in the GenesisSimulation section (its own file, not Default).
@@ -1637,6 +1640,12 @@ namespace
 				churn->second.holding = false;
 			}
 		}
+		ZoneCalls& calls = g_zone_calls[_this];
+		if (calls.calls == 0)
+		{
+			calls.base_failures = ZoneField<int>(_this, "NumSpawnFailures");
+			calls.base_spawned = ZoneField<int>(_this, "NumNPCSpawned");
+		}
 		++g_zone_spawn_depth;
 		++g_zone_spawn_calls;
 		ANPCZoneManager* const outer_zone = g_current_zone;
@@ -1644,7 +1653,6 @@ namespace
 		const bool result = ANPCZoneManager_SpawnNPCs_original(_this);
 		g_current_zone = outer_zone;
 		--g_zone_spawn_depth;
-		ZoneCalls& calls = g_zone_calls[_this];
 		++calls.calls;
 		if (result)
 			++calls.returned_true;
@@ -1924,6 +1932,63 @@ namespace
 	// Commands
 	// ------------------------------------------------------------------------------------------
 
+	// Zones that keep trying and almost never spawn (IsFailingZone), worst first, each with where its first
+	// spawn volume is, so the spot can be looked at with Zones. Spawns are the larger of the game's counter
+	// and the spawns this plugin traced to the zone. A zone switched off stops adding to its count.
+	void AppendFailingZones(std::ostringstream& out)
+	{
+		if (!g_zone_hook_installed)
+			return;
+		struct Failing
+		{
+			ANPCZoneManager* zone = nullptr;
+			int64_t failures = 0;
+			int64_t spawned = 0;
+			uint64_t passes = 0;
+		};
+		std::vector<Failing> failing;
+		for (const auto& [zone, calls] : g_zone_calls)
+		{
+			Failing row;
+			row.zone = zone;
+			row.failures = ZoneField<int>(zone, "NumSpawnFailures") - calls.base_failures;
+			row.spawned = ZoneField<int>(zone, "NumNPCSpawned") - calls.base_spawned;
+			const auto churn = g_zone_churn.find(zone);
+			if (churn != g_zone_churn.end())
+				row.spawned = (std::max)(row.spawned, static_cast<int64_t>(churn->second.spawned));
+			row.passes = calls.calls;
+			if (IsFailingZone(row.failures, row.spawned))
+				failing.push_back(row);
+		}
+		if (failing.empty())
+			return;
+		std::sort(failing.begin(), failing.end(), [](const Failing& a, const Failing& b) { return a.failures > b.failures; });
+		constexpr size_t kShown = 10;
+		out << "Failing zones (since load, " << kFailingZoneMinFailures << "+ spawn failures and at most 1 spawn per "
+			<< kFailingZoneSpawnShare << "; DisableZones switches one off): " << failing.size() << "\n";
+		for (size_t i = 0; i < failing.size() && i < kShown; ++i)
+		{
+			const Failing& row = failing[i];
+			out << "  " << ObjectName(row.zone) << ": " << row.failures << " failures, " << (std::max)(row.spawned, int64_t{ 0 })
+				<< " spawned, " << row.passes << " spawn passes" << (ZoneField<bool>(row.zone, "bEnabled") ? "" : "; now DISABLED");
+			auto& volumes = ZoneField<TArray<FLinkedZoneSpawnVolumeEntry>>(row.zone, "LinkedZoneSpawnVolumeEntries");
+			for (int v = 0; v < volumes.Num() && v < 64; ++v)
+			{
+				AActor* volume = reinterpret_cast<AActor*>(volumes[v].LinkedZoneSpawnVolume);
+				if (volume == nullptr)
+					continue;
+				FVector origin{}, extent{};
+				volume->GetActorBounds(false, &origin, &extent, false);
+				out << "; first spawn volume at " << static_cast<int>(origin.X) << " " << static_cast<int>(origin.Y) << " "
+					<< static_cast<int>(origin.Z);
+				break;
+			}
+			out << "\n";
+		}
+		if (failing.size() > kShown)
+			out << "  ... and " << failing.size() - kShown << " more\n";
+	}
+
 	std::string ListText(const std::string& filter)
 	{
 		std::ostringstream out;
@@ -2023,12 +2088,15 @@ namespace
 				out << "\n";
 			}
 		}
-		if (g_rules != nullptr && !g_rules->enable_zones.empty())
+		AppendFailingZones(out);
+		if (g_rules != nullptr && (!g_rules->enable_zones.empty() || !g_rules->disable_zones.empty()))
 		{
-			out << "EnableZones: " << g_enable_zone_list.size() << " of " << g_rules->enable_zones.size() << " named zones found; switched on "
+			out << "EnableZones/DisableZones: " << g_enable_zone_list.size() << " of "
+				<< g_rules->enable_zones.size() + g_rules->disable_zones.size() << " named zones found; switched "
 				<< g_zones_switched_on << " time(s) since load\n";
 			for (const EnabledZone& entry : g_enable_zone_list)
-				out << "  " << entry.name << ": " << (ZoneField<bool>(entry.zone, "bEnabled") ? "enabled" : "DISABLED") << "\n";
+				out << "  " << entry.name << ": " << (ZoneField<bool>(entry.zone, "bEnabled") ? "enabled" : "DISABLED")
+					<< " (kept " << (entry.on ? "on" : "off") << ")\n";
 		}
 		if (g_ocean_band.enabled)
 		{
@@ -2484,17 +2552,36 @@ namespace
 		return *GetNativePointerField<T*>(zone, (std::string("ANPCZoneManager.") + name).c_str());
 	}
 
-	// Finds the zones EnableZones names (search, once the world exists) and switches any that are off back on.
-	// Checked again after every census: if something keeps disabling a zone, the log shows it each time.
+	// Finds the zones EnableZones and DisableZones name (search, once the world exists) and keeps each in its
+	// state: EnableZones on, DisableZones off (a name in both is kept off). Checked again after every census:
+	// if something keeps switching a zone back, the log shows it each time.
 	void EnableNamedZones(bool search)
 	{
 		if (search)
 		{
 			g_enable_zone_list.clear();
 			UWorld* world = World();
-			if (g_rules == nullptr || g_rules->enable_zones.empty() || world == nullptr)
+			if (g_rules == nullptr || world == nullptr)
 				return;
-			std::vector<bool> found(g_rules->enable_zones.size(), false);
+			// Wanted state per name; DisableZones last so it wins over EnableZones.
+			std::vector<std::pair<std::string, bool>> wanted;
+			for (const std::string& name : g_rules->enable_zones)
+				wanted.emplace_back(name, true);
+			for (const std::string& name : g_rules->disable_zones)
+			{
+				bool replaced = false;
+				for (auto& [existing, on] : wanted)
+					if (EqualsNoCase(existing, name))
+					{
+						on = false;
+						replaced = true;
+					}
+				if (!replaced)
+					wanted.emplace_back(name, false);
+			}
+			if (wanted.empty())
+				return;
+			std::vector<bool> found(wanted.size(), false);
 			auto& levels = world->LevelsField();
 			for (int32 l = 0; l < levels.Num(); ++l)
 			{
@@ -2509,12 +2596,12 @@ namespace
 						continue;
 					ANPCZoneManager* zone = reinterpret_cast<ANPCZoneManager*>(actor);
 					const std::string name = ObjectName(zone);
-					for (size_t i = 0; i < g_rules->enable_zones.size(); ++i)
+					for (size_t i = 0; i < wanted.size(); ++i)
 					{
-						if (!found[i] && EqualsNoCase(name, g_rules->enable_zones[i]))
+						if (!found[i] && EqualsNoCase(name, wanted[i].first))
 						{
 							found[i] = true;
-							g_enable_zone_list.push_back({ zone, name });
+							g_enable_zone_list.push_back({ zone, name, wanted[i].second });
 						}
 					}
 				}
@@ -2522,17 +2609,22 @@ namespace
 			for (size_t i = 0; i < found.size(); ++i)
 			{
 				if (!found[i])
-					Log::GetLog()->warn("EnableZones: no spawn zone named {} on this map", g_rules->enable_zones[i]);
+					Log::GetLog()->warn("{}: no spawn zone named {} on this map", wanted[i].second ? "EnableZones" : "DisableZones",
+						wanted[i].first);
 			}
 		}
 		for (const EnabledZone& entry : g_enable_zone_list)
 		{
 			bool& enabled = ZoneField<bool>(entry.zone, "bEnabled");
-			if (enabled)
+			if (enabled == entry.on)
 				continue;
-			enabled = true;
-			Log::GetLog()->info(g_zones_switched_on == 0 || search ? "EnableZones: switched on {} (it was disabled)"
-				: "EnableZones: {} was disabled again; switched back on", entry.name);
+			enabled = entry.on;
+			if (entry.on)
+				Log::GetLog()->info(g_zones_switched_on == 0 || search ? "EnableZones: switched on {} (it was disabled)"
+					: "EnableZones: {} was disabled again; switched back on", entry.name);
+			else
+				Log::GetLog()->info(g_zones_switched_on == 0 || search ? "DisableZones: switched off {} (it was enabled)"
+					: "DisableZones: {} was enabled again; switched back off", entry.name);
 			++g_zones_switched_on;
 		}
 	}

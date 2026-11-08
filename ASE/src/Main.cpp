@@ -551,6 +551,8 @@ namespace
 		g_auto_block_warned = false;
 		if (g_map_known && g_rules != nullptr && !g_rules->enable_zones.empty())
 			Log::GetLog()->warn("EnableZones is not built for ASE yet; ignored for {}", g_rules->name);
+		if (g_map_known && g_rules != nullptr && !g_rules->disable_zones.empty())
+			Log::GetLog()->warn("DisableZones is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && g_rules != nullptr && !g_rules->spawn_points.empty())
 			Log::GetLog()->warn("SpawnPoints is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && !was_known)

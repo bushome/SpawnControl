@@ -345,6 +345,9 @@ namespace SpawnControl
 		// Spawn zones (by object name, as SpawnControl.Zones prints them) to switch on when the map has them
 		// disabled. Checked again after every census.
 		std::vector<std::string> enable_zones;
+		// Spawn zones to switch off (same names), e.g. water-only zones that fail every spawn pass. A name in
+		// both lists is switched off. Checked again after every census.
+		std::vector<std::string> disable_zones;
 		std::vector<SpawnPointSet> spawn_points;
 		OverlapRule overlap;
 		UnderMeshRule under_mesh;
@@ -731,6 +734,11 @@ namespace SpawnControl
 			}
 
 			rules.enable_zones = ReadStrings(section, "EnableZones", rules.enable_zones, warnings, where);
+			rules.disable_zones = ReadStrings(section, "DisableZones", rules.disable_zones, warnings, where);
+			for (const std::string& off : rules.disable_zones)
+				for (const std::string& on : rules.enable_zones)
+					if (EqualsNoCase(off, on))
+						warnings.push_back(where + off + " is in both EnableZones and DisableZones; it is switched off");
 
 			if (section.contains("AutoBlockRepeats"))
 			{
@@ -778,7 +786,7 @@ namespace SpawnControl
 		}
 
 		constexpr std::initializer_list<const char*> kMapKeys = { "Block", "Limit", "GroupLimit", "Density", "DensitySkip", "BlockAreas", "Overlap",
-			"UnderMesh", "AutoBlockRepeats", "EnableZones", "SpawnPoints" };
+			"UnderMesh", "AutoBlockRepeats", "EnableZones", "DisableZones", "SpawnPoints" };
 
 		// Keys nobody reads are ignored by ARK-style configs without a word; here each one is a warning, with
 		// a hint when the key exists one level up or down.
@@ -1574,6 +1582,18 @@ namespace SpawnControl
 
 		bool Churning(int needed = kChurnRemoved) const { return count >= kChurnWindow && Removed() >= needed; }
 	};
+
+	// Failing zones: a zone that tries on every spawn pass and almost never manages it (a water-only zone
+	// whose volumes are mostly land, a zone whose volumes sit inside the mesh) pays for each attempt
+	// again: every failed pass runs its point checks and traces. Judged on what the zone gained since
+	// load, so counts carried over in the save don't flag a zone that has since recovered.
+	constexpr int64_t kFailingZoneMinFailures = 1000;  // failures since load before a zone is judged
+	constexpr int64_t kFailingZoneSpawnShare = 1000;   // ...and at most one spawn per this many failures
+
+	inline bool IsFailingZone(int64_t failures, int64_t spawned)
+	{
+		return failures >= kFailingZoneMinFailures && (std::max)(spawned, int64_t{ 0 }) * kFailingZoneSpawnShare <= failures;
+	}
 
 	inline bool OverOnSpawn(const ClassRule& rule, int class_count, const std::vector<int>& group_counts,
 		const std::vector<GroupRule>& groups)

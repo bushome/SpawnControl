@@ -889,6 +889,13 @@ static void TestAutoBlock()
 	CHECK((zones.maps[1].enable_zones == std::vector<std::string>{ "Zone_B", "Zone_C" }));
 	CHECK(zones.maps[2].enable_zones.empty() && AnyContains(zones.warnings, "Maps.C.EnableZones must be a list"));   // replaced Default's, then ignored
 
+	// DisableZones: same list rules; a name in both lists gets a warning (it is switched off).
+	const Settings off = ParseConfigText(R"({ "Maps": { "A": { "DisableZones": [ "Water_1", "Water_2" ] },
+		"B": { "EnableZones": [ "Zone_X" ], "DisableZones": [ "zone_x" ] } } })");
+	CHECK((off.maps[0].disable_zones == std::vector<std::string>{ "Water_1", "Water_2" }));
+	CHECK(off.maps[1].disable_zones.size() == 1 && AnyContains(off.warnings, "zone_x is in both EnableZones and DisableZones"));
+	CHECK(!AnyContains(off.warnings, "DisableZones is not a known setting"));
+
 	// Six removals on one spot become one area; disabled, full or too wide gives none.
 	std::vector<RemovalPoint> points;
 	for (int i = 0; i < 6; ++i)
@@ -1024,6 +1031,14 @@ static void TestChurnAndSources()
 		mixed.Add(i < kChurnRemoved);
 	CHECK(mixed.Churning() && mixed.Removed() == kChurnRemoved);   // 12 of 20: held by default
 	CHECK(!mixed.Churning(13));
+
+	CHECK(!IsFailingZone(kFailingZoneMinFailures - 1, 0));                 // too few failures to judge
+	CHECK(IsFailingZone(kFailingZoneMinFailures, 0));
+	CHECK(IsFailingZone(3100000, 0));                                       // the Lost Colony plaza water zones
+	CHECK(IsFailingZone(185000, 4));                                        // the Umbra night zone
+	CHECK(!IsFailingZone(185000, 498));                                     // a zone that does spawn, if poorly
+	CHECK(IsFailingZone(10000, 10) && !IsFailingZone(10000, 11));          // one spawn per 1000 failures at most
+	CHECK(IsFailingZone(5000, -3));                                         // a falling spawn counter counts as none
 
 	CHECK(ParseConfigText(R"({})").churn_removed == kChurnRemoved);
 	CHECK(ParseConfigText(R"({ "General": { "ChurnRemoved": 16 } })").churn_removed == 16);

@@ -16,8 +16,9 @@ ASE API lacks what they need, or because they were written for ASA maps.
 | `DensitySkip.Caves` | yes | no cave flag; use `DensitySkip.Areas` |
 | `BlockAreas`, `AutoBlockRepeats` | yes | yes |
 | `AsaGen1OceanBand` | yes | ignored with a warning |
-| `EnableZones`, `SpawnPoints` | yes | ignored with a warning |
+| `EnableZones`, `DisableZones`, `SpawnPoints` | yes | ignored with a warning |
 | `SpawnControl.Zones`, `SpawnControl.Links` | yes | no |
+| `List`'s Failing zones section | yes | no (no zone tooling) |
 | Mission creatures left alone | Lost Colony outposts, Genesis missions | Genesis Part 1 and 2 missions |
 | Map name match | `_WP` suffix may be left off | as reported |
 | Hot-reload file name | `SpawnControl.dll.arkapi` | `SpawnControl.dll.ArkApi` |
@@ -30,7 +31,7 @@ ASE API lacks what they need, or because they were written for ASA maps.
   while; populations differ between the games.
 - **Block areas, `<Map>.auto.json` files and coordinates** are tied to ASA geometry: drop them all. Keep
   `AutoBlockRepeats` enabled so ASE builds its own.
-- **ASA-only settings:** drop `AsaGen1OceanBand`, `EnableZones` and `SpawnPoints`.
+- **ASA-only settings:** drop `AsaGen1OceanBand`, `EnableZones`, `DisableZones` and `SpawnPoints`.
 - **Section names:** ASE map names differ (no `_WP`, some end in `_P`). Keying sections by `-ServerKey=` and
   naming the map files after the server keys avoids the problem. Check each server's load line or
   `SpawnControl.Rules` after the first start.

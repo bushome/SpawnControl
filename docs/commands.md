@@ -29,8 +29,16 @@ removals (average and worst, in ms); zone entries checked and refused; zones hel
 unheld zones feeding the most removals; every limited or blocked class and every group with its count now and
 each member's count; the density rules with the 10 fullest cubes each found last census, one per spot (count,
 location for `setplayerpos`, top classes); under-mesh results, repeat spots, stopped zones and block areas
-(auto areas marked `(auto)`); on ASA, enabled zones, spawn points and the Genesis ocean band; the report
+(auto areas marked `(auto)`); on ASA, spawn points, failing zones, the zones named in `EnableZones` and
+`DisableZones`, and the Genesis ocean band; the report
 families; and the ten largest classes without a rule, which are the candidates for a limit.
+
+**Failing zones** (ASA) lists zones that keep trying and almost never spawn: at least 1000 spawn failures
+since load and at most one spawn per 1000 failures, worst first (10 shown), each with its failures, spawns,
+spawn passes and where its first spawn volume is. Every failed pass costs point checks and traces again, so
+these are FPS drains worth switching off with `DisableZones`; see
+[Zones and spawn points](zones-and-spawn-points.md#disablezones). The section only appears when a zone
+qualifies, and counts start at load, so give the map a while after a restart.
 
 Counts are the last census minus what it queued for removal, plus spawns since. Max values are kept since
 load.

@@ -134,6 +134,7 @@ picked and why.
 | `AutoBlockRepeats` | Turn repeat under-mesh spots into block areas automatically. See [Under-mesh and block areas](under-mesh.md#autoblockrepeats). |
 | `AsaGen1OceanBand` | *ASA only*, Genesis 1 only. See [Under-mesh and block areas](under-mesh.md#asagen1oceanband). |
 | `EnableZones` | *ASA only*. Switch disabled spawn zones back on. See [Zones and spawn points](zones-and-spawn-points.md#enablezones). |
+| `DisableZones` | *ASA only*. Switch spawn zones off, such as water-only zones that fail every pass. See [Zones and spawn points](zones-and-spawn-points.md#disablezones). |
 | `SpawnPoints` | *ASA only*. Spawn creatures where the map's zones never do. See [Zones and spawn points](zones-and-spawn-points.md#spawnpoints). |
 
 ## Class keys
