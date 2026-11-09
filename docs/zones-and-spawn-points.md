@@ -8,6 +8,7 @@
 - [Diagnosing a zone: SpawnControl.Zones](#diagnosing-a-zone-spawncontrolzones)
 - [EnableZones](#enablezones)
 - [DisableZones](#disablezones)
+- [AutoDisableZones](#autodisablezones)
 - [SpawnPoints](#spawnpoints)
 - [Worked example: a cave that never spawned wyverns](#worked-example-a-cave-that-never-spawned-wyverns)
 
@@ -67,6 +68,38 @@ and look. By hand: look for zones with a huge
 `spawn failures` count, `spawned 0` and `only in water`, and run `Zones` twice a few minutes apart: if the
 failures rise by the number of passes, the zone never succeeds. Switching it off also removes whatever it
 would have spawned; put those back with [SpawnPoints](#spawnpoints) if needed.
+
+## AutoDisableZones
+
+```json
+"AutoDisableZones": { "Enabled": true, "MinFailedPasses": 500, "MaxZones": 100 }
+```
+
+Switches failing zones off by itself, so they don't have to be found and pasted into `DisableZones` by hand.
+After each census, a zone is switched off when all of these hold:
+
+- it is failing (see `List`'s **Failing zones**: at most one spawn per 1000 failed passes) and has failed at
+  least `MinFailedPasses` spawn passes since load (default 500, about an hour; at least 100);
+- SpawnControl never refused one of its entries this load. An entry refused because its creatures are at their
+  limit, or a zone stopped by a block area, fails passes too; those zones are never switched off for it;
+- it is not a time-of-day zone (`NPCZoneManager_ToD_C`): the game switches those in day/night pairs and spawn
+  points can't stand in for them, so they are left to `DisableZones` by hand;
+- it is not named in `EnableZones`, `DisableZones` or the auto list already.
+
+Each one is logged (`AutoDisableZones: switched off ...` with its failures, spawns and first three entries) and
+added to the `DisableZones` list in `<Map>.auto.json`, next to the auto block areas, so it stays off after a
+restart, like a `DisableZones` entry. Delete a name from that file to let the zone run again. Off unless
+`Enabled`; the list is still kept off when it is turned off. It needs a map file of its own and a SharedConfig
+folder, like [AutoBlockRepeats](under-mesh.md#autoblockrepeats). At most `MaxZones` names are kept per map.
+
+Zone names can change with a game update (the number at the end of the name). A name in the auto list that is no
+longer on the map is dropped from the file with a log line, and the zone is switched off again under its new
+name once it has failed long enough. Names in `EnableZones` and `DisableZones` are only warned about
+(`no spawn zone named ... on this map`); fix those by hand with `SpawnControl.Zones`.
+
+`List` shows the count (`Auto-disabled zones: N in <Map>.auto.json`); `SpawnControl.List failing` lists them.
+Switching a zone off also removes whatever it would have spawned; add it back with [SpawnPoints](#spawnpoints)
+if it is wanted there.
 
 ## SpawnPoints
 

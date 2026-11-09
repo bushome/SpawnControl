@@ -553,6 +553,8 @@ namespace
 			Log::GetLog()->warn("EnableZones is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && g_rules != nullptr && !g_rules->disable_zones.empty())
 			Log::GetLog()->warn("DisableZones is not built for ASE yet; ignored for {}", g_rules->name);
+		if (g_map_known && g_rules != nullptr && (g_rules->auto_disable.enabled || !g_rules->auto_disabled_zones.empty()))
+			Log::GetLog()->warn("AutoDisableZones is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && g_rules != nullptr && !g_rules->spawn_points.empty())
 			Log::GetLog()->warn("SpawnPoints is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && !was_known)
@@ -954,7 +956,7 @@ namespace
 				std::ofstream file(temp, std::ios::binary | std::ios::trunc);
 				if (!file.is_open())
 					throw std::runtime_error("cannot write " + SpawnControl::detail::Utf8FromPath(temp));
-				file << AutoAreasJson(g_rules->block_areas).dump(2) << "\n";
+				file << AutoAreasJson(g_rules->block_areas, g_rules->auto_disabled_zones).dump(2) << "\n";
 				if (!file)
 					throw std::runtime_error("write failed for " + SpawnControl::detail::Utf8FromPath(temp));
 			}

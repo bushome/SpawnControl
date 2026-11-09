@@ -40,7 +40,8 @@ warning). The path can be:
   only that map's rules, e.g. `Aberration.json` containing `{ "Limit": { ... }, "UnderMesh": { ... } }`. The
   file name is the section name, matched as `Maps` sections are. A map file replaces a section of the same
   name in the folder's `config.json` (with a warning). `<section>.auto.json` files are written by
-  [AutoBlockRepeats](under-mesh.md#autoblockrepeats) and attached to their map, not read as sections. Other
+  [AutoBlockRepeats](under-mesh.md#autoblockrepeats) and [AutoDisableZones](zones-and-spawn-points.md#autodisablezones)
+  and attached to their map, not read as sections. Other
   files are ignored.
 
 If the shared file or folder cannot be read, or any file in it is not valid JSON, the load fails: at startup
@@ -135,6 +136,7 @@ picked and why.
 | `AsaGen1OceanBand` | *ASA only*, Genesis 1 only. See [Under-mesh and block areas](under-mesh.md#asagen1oceanband). |
 | `EnableZones` | *ASA only*. Switch disabled spawn zones back on. See [Zones and spawn points](zones-and-spawn-points.md#enablezones). |
 | `DisableZones` | *ASA only*. Switch spawn zones off, such as water-only zones that fail every pass. See [Zones and spawn points](zones-and-spawn-points.md#disablezones). |
+| `AutoDisableZones` | *ASA only*. `{ "Enabled": true, "MinFailedPasses": 500, "MaxZones": 100 }`. Switch zones that keep failing on their own off automatically, kept in `<Map>.auto.json`. See [Zones and spawn points](zones-and-spawn-points.md#autodisablezones). |
 | `SpawnPoints` | *ASA only*. Spawn creatures where the map's zones never do. See [Zones and spawn points](zones-and-spawn-points.md#spawnpoints). |
 
 ## Class keys

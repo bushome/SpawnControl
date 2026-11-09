@@ -834,6 +834,16 @@ static void TestSharedConfig()
 	with_auto = LoadConfigFiles(plugin);   // a broken auto file is a warning, never a failed load
 	center = FindMapRules(with_auto, "Center");
 	CHECK(center != nullptr && center->block_areas.empty() && AnyContains(with_auto.warnings, "Center.auto.json"));
+	// Its DisableZones list (zones AutoDisableZones switched off) is read too; a file with only that list is fine.
+	WriteText(root / "shared" / "Center.auto.json", R"({ "DisableZones": [ "Zone_A", "Zone_B" ] })");
+	with_auto = LoadConfigFiles(plugin);
+	center = FindMapRules(with_auto, "Center");
+	CHECK(center != nullptr && center->block_areas.empty() && center->disable_zones.empty() &&
+		(center->auto_disabled_zones == std::vector<std::string>{ "Zone_A", "Zone_B" }));
+	CHECK(!AnyContains(with_auto.warnings, "Center.auto.json"));
+	WriteText(root / "shared" / "Center.auto.json", R"({ "Areas": [] })");
+	with_auto = LoadConfigFiles(plugin);
+	CHECK(AnyContains(with_auto.warnings, "Center.auto.json needs a BlockAreas or DisableZones list"));
 	fs::remove(root / "shared" / "Center.auto.json");
 	fs::remove(root / "shared" / "Nowhere.auto.json");
 	CHECK(!LoadConfigFiles(plugin).auto_folder.empty());   // known even with no auto file yet, so the first can be written
@@ -881,6 +891,23 @@ static void TestAutoBlock()
 	CHECK(AnyContains(bad.warnings, "Maps.A.AutoBlockRepeats.MaxAreas must be at least 1"));
 	CHECK(AnyContains(bad.warnings, "Maps.A.AutoBlockRepeats.Radius is not a known setting"));
 	CHECK(AnyContains(bad.warnings, "Maps.B.AutoBlockRepeats must be an object"));
+
+	// AutoDisableZones: the same shape; MinFailedPasses no lower than the failing-zone cutoff.
+	CHECK(!ParseConfigText(R"({ "Maps": { "A": {} } })").maps[0].auto_disable.enabled);
+	const Settings auto_zones = ParseConfigText(R"({ "Default": { "AutoDisableZones": { "Enabled": true, "MinFailedPasses": 800 } },
+		"Maps": { "A": {}, "B": { "AutoDisableZones": { "Enabled": false } } } })");
+	CHECK(auto_zones.maps[0].auto_disable.enabled && auto_zones.maps[0].auto_disable.min_failed_passes == 800 &&
+		auto_zones.maps[0].auto_disable.max_zones == 100);
+	CHECK(!auto_zones.maps[1].auto_disable.enabled && auto_zones.maps[1].auto_disable.min_failed_passes == 800);
+	CHECK(auto_zones.warnings.empty());
+	const Settings bad_zones = ParseConfigText(R"({ "Maps": { "A": { "AutoDisableZones": { "Enabled": 1, "MinFailedPasses": 50, "MaxZones": 0, "Max": 3 } },
+		"B": { "AutoDisableZones": [] } } })");
+	CHECK(!bad_zones.maps[0].auto_disable.enabled && bad_zones.maps[0].auto_disable.min_failed_passes == 500);
+	CHECK(AnyContains(bad_zones.warnings, "Maps.A.AutoDisableZones.Enabled must be true or false"));
+	CHECK(AnyContains(bad_zones.warnings, "Maps.A.AutoDisableZones.MinFailedPasses must be at least 100"));
+	CHECK(AnyContains(bad_zones.warnings, "Maps.A.AutoDisableZones.MaxZones must be at least 1"));
+	CHECK(AnyContains(bad_zones.warnings, "Maps.A.AutoDisableZones.Max is not a known setting"));
+	CHECK(AnyContains(bad_zones.warnings, "Maps.B.AutoDisableZones must be an object"));
 
 	// EnableZones: a list of zone names; a list replaces Default's like any other.
 	const Settings zones = ParseConfigText(R"({ "Default": { "EnableZones": [ "Zone_A" ] },
@@ -941,6 +968,10 @@ static void TestAutoBlock()
 	std::vector<std::string> read_warnings;
 	const std::vector<BlockArea> back = SpawnControl::detail::ReadAreas(saved["BlockAreas"], "x", read_warnings);
 	CHECK(back.size() == 1 && read_warnings.empty() && back[0].radius == 7 * kFoundation && back[0].z == 301);
+	// Auto-disabled zones are saved next to the areas, and only when there are any.
+	CHECK(!saved.contains("DisableZones"));
+	const nlohmann::json with_zones = AutoAreasJson({ automatic }, { "Zone_A", "Zone_B" });
+	CHECK(with_zones["DisableZones"] == nlohmann::json::array({ "Zone_A", "Zone_B" }) && with_zones["BlockAreas"].size() == 1);
 }
 
 static void TestSpawnPoints()
@@ -1038,7 +1069,21 @@ static void TestChurnAndSources()
 	CHECK(IsFailingZone(185000, 4));                                        // the Umbra night zone
 	CHECK(!IsFailingZone(185000, 498));                                     // a zone that does spawn, if poorly
 	CHECK(IsFailingZone(10000, 10) && !IsFailingZone(10000, 11));          // one spawn per 1000 failures at most
+	CHECK(IsFailingZone(2176, 0) && !IsFailingZone(500, 1));               // test server, ~4 h after boot; one spawn early on
 	CHECK(IsFailingZone(5000, -3));                                         // a falling spawn counter counts as none
+
+	// AutoDisableZones: off unless enabled; only zones failing on their own, never time-of-day zones.
+	AutoDisableZoneRule auto_off;
+	CHECK(!ShouldAutoDisableZone(auto_off, "NPCZoneManager_UAID_1", 5000, 0, 0));
+	AutoDisableZoneRule auto_on;
+	auto_on.enabled = true;
+	CHECK(ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 500, 0, 0));
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 499, 0, 0));           // not long enough yet
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 5000, 6, 0));          // spawns now and then
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 5000, 0, 1));          // SpawnControl refused an entry
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_ToD_C_UAID_581122A0FE1446E302_1332763608", 185000, 4, 0));
+	CHECK(ShouldAutoDisableZone(auto_on, "BeeRedwood_UAID_D8BBC1D07AAAB3AA02_1365357603", 2176, 0, 0));
+	CHECK(IsTimeOfDayZone("NPCZoneManager_ToD_C_UAID_1") && !IsTimeOfDayZone("NPCZoneManager_UAID_1"));
 
 	CHECK(ParseConfigText(R"({})").churn_removed == kChurnRemoved);
 	CHECK(ParseConfigText(R"({ "General": { "ChurnRemoved": 16 } })").churn_removed == 16);

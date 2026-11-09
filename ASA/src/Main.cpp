@@ -28,6 +28,7 @@
 #include <cwctype>
 #include <deque>
 #include <cctype>
+#include <cstddef>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -218,6 +219,7 @@ namespace
 		uint64_t returned_true = 0;
 		int64_t base_failures = 0;  // the game's counters at its first pass since load (they may come from the save)
 		int64_t base_spawned = 0;
+		uint64_t refused = 0;       // its entries SpawnControl refused (creatures at their limit, or zone stopped)
 	};
 	std::unordered_map<ANPCZoneManager*, ZoneCalls> g_zone_calls;
 
@@ -348,6 +350,9 @@ namespace
 	// AutoBlockRepeats: repeat spots of under-mesh removals turned into block areas, kept in <Map>.auto.json.
 	uint64_t g_auto_areas_added = 0;        // since load
 	bool g_auto_block_warned = false;       // "cannot run here" said once per load
+	// AutoDisableZones: zones that keep failing on their own, switched off and kept in <Map>.auto.json.
+	uint64_t g_auto_zones_disabled = 0;     // since load
+	bool g_auto_disable_warned = false;     // "cannot run here" said once per load
 	size_t g_band_logged_this_minute = 0;
 	uint64_t g_summoned_seen = 0;                       // creatures marked summoned since load
 	std::unordered_set<uint64_t> g_summoned;            // wild creatures that appeared outside a zone spawn
@@ -586,6 +591,7 @@ namespace
 		ANPCZoneManager* zone = nullptr;
 		std::string name;
 		bool on = true;   // the state SpawnControl keeps it in
+		bool is_auto = false; // from AutoDisableZones (<Map>.auto.json), not the map file
 	};
 	std::vector<EnabledZone> g_enable_zone_list;
 	uint64_t g_zones_switched_on = 0;   // times a listed zone was found in the wrong state and switched, since load
@@ -664,6 +670,7 @@ namespace
 		}
 		ReadOceanBand();
 		g_auto_block_warned = false;
+		g_auto_disable_warned = false;
 		EnableNamedZones(true);
 		g_spawn_states.clear(); // the sets may have changed; counters start again
 		if (g_map_known && !was_known)
@@ -1109,7 +1116,7 @@ namespace
 				std::ofstream file(temp, std::ios::binary | std::ios::trunc);
 				if (!file.is_open())
 					throw std::runtime_error("cannot write " + SpawnControl::detail::Utf8FromPath(temp));
-				file << AutoAreasJson(g_rules->block_areas).dump(2) << "\n";
+				file << AutoAreasJson(g_rules->block_areas, g_rules->auto_disabled_zones).dump(2) << "\n";
 				if (!file)
 					throw std::runtime_error("write failed for " + SpawnControl::detail::Utf8FromPath(temp));
 			}
@@ -1117,7 +1124,7 @@ namespace
 		}
 		catch (const std::exception& e)
 		{
-			Log::GetLog()->error("AutoBlockRepeats: could not save {}: {}; the new areas hold until the next reload",
+			Log::GetLog()->error("Could not save {}: {}; the new auto areas and zones hold until the next reload",
 				SpawnControl::detail::Utf8FromPath(path), e.what());
 		}
 	}
@@ -1194,6 +1201,13 @@ namespace
 		SaveAutoAreas();
 	}
 
+	// Defined further down, next to EntryAt; FinishCensus calls it once to log the struct sizes.
+	template <typename T>
+	size_t GameStride(const char* name);
+	struct SpawnEntryLayout;
+	const SpawnEntryLayout& SpawnEntryOffsets();
+	void RunAutoDisableZones();
+
 	void FinishCensus()
 	{
 		g_census_running = false;
@@ -1205,6 +1219,7 @@ namespace
 		g_band_seen_building.clear();
 		g_seconds_since_census = 0;
 		RunAutoBlock(); // new areas apply from the next census
+		RunAutoDisableZones();
 		EnableNamedZones(false);
 		RunSpawnPoints();
 
@@ -1276,6 +1291,13 @@ namespace
 		g_building.overlap_samples = plan.overlap_samples;
 
 		++g_census_number;
+		if (g_census_number == 1)
+		{
+			// Logs whether the game's spawn structs still match the API headers (see GameStride).
+			GameStride<FNPCSpawnEntry>("FNPCSpawnEntry");
+			GameStride<FLinkedZoneSpawnVolumeEntry>("FLinkedZoneSpawnVolumeEntry");
+			SpawnEntryOffsets();
+		}
 		if (!g_creature_zone.empty())
 		{
 			for (const CensusItem& item : g_census_items)
@@ -1554,6 +1576,139 @@ namespace
 		}
 	}
 
+	// Every field of a game struct as the game lays it out (name, offset, size), logged once when the struct's
+	// size differs from the API header's, so the header can be corrected.
+	void LogStructLayout(UScriptStruct* script_struct, const char* name)
+	{
+		int count = 0;
+		for (FField* field = script_struct->ChildPropertiesField(); field != nullptr && count < 200; field = field->NextField(), ++count)
+		{
+			FProperty* property = static_cast<FProperty*>(field);
+			Log::GetLog()->info("{} layout: offset {:4} size {:3} {}", name, property->Offset_InternalField(),
+				property->ElementSizeField() * (std::max)(property->ArrayDimField(), 1), field->NamePrivateField().ToString().ToString());
+		}
+	}
+
+	// Arrays of game structs are walked with each struct's size in the running game, not the API header's.
+	// When a game update changes a struct and the header is not updated, indexing with the header's size
+	// reads every element after the first from the wrong place (a Zones crash on AsaApi 2.1, Nov 2026).
+	// The two sizes are compared and logged once; the header's size is only a fallback.
+	template <typename T>
+	size_t GameStride(const char* name)
+	{
+		static size_t stride = 0;
+		static bool fallback_logged = false;
+		if (stride != 0)
+			return stride;
+		size_t game = 0;
+		if (UScriptStruct* script_struct = FindScriptStruct<T>())
+		{
+			const size_t size = static_cast<size_t>((std::max)(script_struct->PropertiesSizeField(), 0));
+			const size_t align = static_cast<size_t>((std::max)(static_cast<int>(script_struct->MinAlignmentField()), 1));
+			if (size > 0 && (align & (align - 1)) == 0)
+				game = (size + align - 1) & ~(align - 1);
+		}
+		if (game == 0)
+		{
+			if (!fallback_logged)
+				Log::GetLog()->warn("{}: size not found in the game yet; using the API header's {} bytes", name, sizeof(T));
+			fallback_logged = true;
+			return sizeof(T);
+		}
+		if (game != sizeof(T))
+		{
+			Log::GetLog()->warn("{}: the game's struct is {} bytes, the API header's {}; using the game's size", name, game, sizeof(T));
+			LogStructLayout(FindScriptStruct<T>(), name);
+		}
+		else
+			Log::GetLog()->info("{}: {} bytes, matches the API header", name, game);
+		stride = game;
+		return stride;
+	}
+
+	FNPCSpawnEntry& EntryAt(TArray<FNPCSpawnEntry>& entries, int index)
+	{
+		return *reinterpret_cast<FNPCSpawnEntry*>(reinterpret_cast<char*>(entries.GetData()) +
+			static_cast<size_t>(index) * GameStride<FNPCSpawnEntry>("FNPCSpawnEntry"));
+	}
+
+	FLinkedZoneSpawnVolumeEntry& VolumeEntryAt(TArray<FLinkedZoneSpawnVolumeEntry>& volumes, int index)
+	{
+		return *reinterpret_cast<FLinkedZoneSpawnVolumeEntry*>(reinterpret_cast<char*>(volumes.GetData()) +
+			static_cast<size_t>(index) * GameStride<FLinkedZoneSpawnVolumeEntry>("FLinkedZoneSpawnVolumeEntry"));
+	}
+
+	// Where the fields SpawnControl reads sit in the game's FNPCSpawnEntry. The game's struct can differ from
+	// the API header after an update (304 vs 296 bytes on AsaApi 2.1, Nov 2026), so each offset is taken
+	// from the game's reflection data; the header's offset is only a fallback. Differences are logged once.
+	struct SpawnEntryLayout
+	{
+		size_t name = offsetof(FNPCSpawnEntry, AnEntryName);
+		size_t classes = offsetof(FNPCSpawnEntry, NPCsToSpawn);
+		size_t weight = offsetof(FNPCSpawnEntry, EntryWeight);
+	};
+
+	const SpawnEntryLayout& SpawnEntryOffsets()
+	{
+		static SpawnEntryLayout layout;
+		static bool resolved = false;
+		static bool fallback_logged = false;
+		if (resolved)
+			return layout;
+		UScriptStruct* script_struct = FindScriptStruct<FNPCSpawnEntry>();
+		if (script_struct == nullptr)
+		{
+			if (!fallback_logged)
+				Log::GetLog()->warn("FNPCSpawnEntry: fields not found in the game yet; using the API header's offsets");
+			fallback_logged = true;
+			return layout;
+		}
+		const auto resolve = [&](const char* field, size_t& offset)
+		{
+			const size_t header = offset;
+			FProperty* property = script_struct->FindPropertyByName(FName(field));
+			if (property == nullptr || property->Offset_InternalField() < 0)
+			{
+				Log::GetLog()->warn("FNPCSpawnEntry.{}: not found in the game; using the API header's offset {}", field, header);
+				return;
+			}
+			offset = static_cast<size_t>(property->Offset_InternalField());
+			if (offset != header)
+				Log::GetLog()->warn("FNPCSpawnEntry.{}: the game's offset is {}, the API header's {}; using the game's", field, offset, header);
+			else
+				Log::GetLog()->info("FNPCSpawnEntry.{}: offset {}, matches the API header", field, offset);
+		};
+		resolve("AnEntryName", layout.name);
+		resolve("NPCsToSpawn", layout.classes);
+		resolve("EntryWeight", layout.weight);
+		resolved = true;
+		return layout;
+	}
+
+	template <typename F>
+	F& EntryField(FNPCSpawnEntry& entry, size_t offset)
+	{
+		return *reinterpret_cast<F*>(reinterpret_cast<char*>(&entry) + offset);
+	}
+
+	decltype(FNPCSpawnEntry::NPCsToSpawn)& EntryClasses(FNPCSpawnEntry& entry)
+	{
+		return EntryField<decltype(FNPCSpawnEntry::NPCsToSpawn)>(entry, SpawnEntryOffsets().classes);
+	}
+
+	float EntryWeight(FNPCSpawnEntry& entry)
+	{
+		return EntryField<float>(entry, SpawnEntryOffsets().weight);
+	}
+
+	// Entry names can come back without text; a null string must not reach std::string.
+	std::string EntryName(FNPCSpawnEntry& entry)
+	{
+		FString& name = EntryField<FString>(entry, SpawnEntryOffsets().name);
+		const TCHAR* text = *name;
+		return text != nullptr ? name.ToString() : std::string("?");
+	}
+
 	// True when every creature class an entry would spawn is blocked or at its limit. An entry with no
 	// readable class, or with any class that still has room, is left to the game.
 	bool EntryIsFull(FNPCSpawnEntry* entry, int& first_full)
@@ -1562,7 +1717,7 @@ namespace
 		bool any = false;
 		// NPCsToSpawn holds soft class pointers. Only their cached weak pointer is read: it never loads an
 		// asset, and a class that is not loaded has no creatures yet, so it cannot be full.
-		for (TSoftClassPtr<APrimalDinoCharacter>& soft : entry->NPCsToSpawn)
+		for (TSoftClassPtr<APrimalDinoCharacter>& soft : EntryClasses(*entry))
 		{
 			UObject* loaded = reinterpret_cast<FWeakObjectPtr*>(&soft)->Get(false);
 			UClass* cls = static_cast<UClass*>(loaded);
@@ -1593,6 +1748,7 @@ namespace
 			if (zone != g_zone_stats.end() && zone->second.stopped)
 			{
 				++g_stopped_zone_refusals;
+				++g_zone_calls[_this].refused;
 				return false;
 			}
 		}
@@ -1610,6 +1766,7 @@ namespace
 			{
 				++g_entry_refused;
 				++g_refused_since_log[first_full];
+				++g_zone_calls[_this].refused;
 			}
 		}
 		catch (const std::exception& exception)
@@ -1935,10 +2092,11 @@ namespace
 	// Zones that keep trying and almost never spawn (IsFailingZone), worst first, each with where its first
 	// spawn volume is, so the spot can be looked at with Zones. Spawns are the larger of the game's counter
 	// and the spawns this plugin traced to the zone. A zone switched off stops adding to its count.
-	void AppendFailingZones(std::ostringstream& out)
+	// Shows at most `shown` zones; returns how many qualify.
+	size_t AppendFailingZones(std::ostringstream& out, size_t shown)
 	{
 		if (!g_zone_hook_installed)
-			return;
+			return 0;
 		struct Failing
 		{
 			ANPCZoneManager* zone = nullptr;
@@ -1961,20 +2119,27 @@ namespace
 				failing.push_back(row);
 		}
 		if (failing.empty())
-			return;
-		std::sort(failing.begin(), failing.end(), [](const Failing& a, const Failing& b) { return a.failures > b.failures; });
-		constexpr size_t kShown = 10;
-		out << "Failing zones (since load, " << kFailingZoneMinFailures << "+ spawn failures and at most 1 spawn per "
-			<< kFailingZoneSpawnShare << "; DisableZones switches one off): " << failing.size() << "\n";
-		for (size_t i = 0; i < failing.size() && i < kShown; ++i)
+			return 0;
+		std::sort(failing.begin(), failing.end(), [](const Failing& a, const Failing& b) {
+			return a.failures != b.failures ? a.failures > b.failures : ObjectName(a.zone) < ObjectName(b.zone); });
+		out << "Failing zones (since load, " << kFailingZoneMinFailures << "+ failed spawn passes and at most 1 spawn per "
+			<< kFailingZoneSpawnShare << "; DisableZones or AutoDisableZones switches one off): " << failing.size()
+			<< (failing.size() > shown ? std::string("; ") + kCmdList + " failing shows all" : std::string()) << "\n";
+		for (size_t i = 0; i < failing.size() && i < shown; ++i)
 		{
 			const Failing& row = failing[i];
 			out << "  " << ObjectName(row.zone) << ": " << row.failures << " failures, " << (std::max)(row.spawned, int64_t{ 0 })
-				<< " spawned, " << row.passes << " spawn passes" << (ZoneField<bool>(row.zone, "bEnabled") ? "" : "; now DISABLED");
+				<< " spawned, " << row.passes << " spawn passes" << (ZoneField<bool>(row.zone, "bEnabled") ? "" : "; now DISABLED")
+				<< (ZoneField<bool>(row.zone, "bOnlySpawnInWater") ? "; only in water" : "");
+			TArray<FNPCSpawnEntry>& entries = row.zone->NPCSpawnEntriesField();
+			for (int e = 0; e < entries.Num() && e < 3; ++e)
+				out << (e == 0 ? "; spawns \"" : ", \"") << EntryName(EntryAt(entries, e)) << "\"";
+			if (entries.Num() > 3)
+				out << " +" << entries.Num() - 3;
 			auto& volumes = ZoneField<TArray<FLinkedZoneSpawnVolumeEntry>>(row.zone, "LinkedZoneSpawnVolumeEntries");
 			for (int v = 0; v < volumes.Num() && v < 64; ++v)
 			{
-				AActor* volume = reinterpret_cast<AActor*>(volumes[v].LinkedZoneSpawnVolume);
+				AActor* volume = reinterpret_cast<AActor*>(VolumeEntryAt(volumes, v).LinkedZoneSpawnVolume);
 				if (volume == nullptr)
 					continue;
 				FVector origin{}, extent{};
@@ -1985,8 +2150,9 @@ namespace
 			}
 			out << "\n";
 		}
-		if (failing.size() > kShown)
-			out << "  ... and " << failing.size() - kShown << " more\n";
+		if (failing.size() > shown)
+			out << "  ... and " << failing.size() - shown << " more\n";
+		return failing.size();
 	}
 
 	std::string ListText(const std::string& filter)
@@ -1994,6 +2160,22 @@ namespace
 		std::ostringstream out;
 		out << "SpawnControl on " << (g_map_name.empty() ? std::string("?") : g_map_name) << ": section "
 			<< (g_rules != nullptr ? g_rules->name : std::string("none")) << " (" << g_section_source << ")\n";
+
+		if (ToLower(filter) == "failing")
+		{
+			if (!g_zone_hook_installed)
+				out << "Zone spawn hook not installed: failing zones can't be tracked.\n";
+			else if (AppendFailingZones(out, (std::numeric_limits<size_t>::max)()) == 0)
+				out << "No failing zones yet (" << kFailingZoneMinFailures << "+ failed spawn passes since load needed).\n";
+			if (g_rules != nullptr && !g_rules->auto_disabled_zones.empty())
+			{
+				out << "Auto-disabled zones (" << AutoAreasFileName(g_rules->name) << "): " << g_rules->auto_disabled_zones.size() << "\n";
+				for (const EnabledZone& entry : g_enable_zone_list)
+					if (entry.is_auto)
+						out << "  " << entry.name << ": " << (ZoneField<bool>(entry.zone, "bEnabled") ? "enabled" : "DISABLED") << "\n";
+			}
+			return out.str();
+		}
 
 		if (!g_have_report)
 		{
@@ -2088,15 +2270,30 @@ namespace
 				out << "\n";
 			}
 		}
-		AppendFailingZones(out);
-		if (g_rules != nullptr && (!g_rules->enable_zones.empty() || !g_rules->disable_zones.empty()))
+		AppendFailingZones(out, 10);
+		if (g_rules != nullptr && (g_rules->auto_disable.enabled || !g_rules->auto_disabled_zones.empty()))
+			out << "Auto-disabled zones: " << g_rules->auto_disabled_zones.size() << " in " << AutoAreasFileName(g_rules->name) << " ("
+				<< g_auto_zones_disabled << " switched off since load"
+				<< (g_rules->auto_disable.enabled ? "; switching off at " + std::to_string(g_rules->auto_disable.min_failed_passes) +
+					"+ failed passes, at most " + std::to_string(g_rules->auto_disable.max_zones) : std::string("; AutoDisableZones off, kept off anyway"))
+				<< ")\n";
+		if (g_rules != nullptr && (!g_rules->enable_zones.empty() || !g_rules->disable_zones.empty() || !g_rules->auto_disabled_zones.empty()))
 		{
-			out << "EnableZones/DisableZones: " << g_enable_zone_list.size() << " of "
-				<< g_rules->enable_zones.size() + g_rules->disable_zones.size() << " named zones found; switched "
-				<< g_zones_switched_on << " time(s) since load\n";
+			size_t auto_shown = 0;
 			for (const EnabledZone& entry : g_enable_zone_list)
+				auto_shown += entry.is_auto ? 1 : 0;
+			out << "EnableZones/DisableZones: " << g_enable_zone_list.size() - auto_shown << " of "
+				<< g_rules->enable_zones.size() + g_rules->disable_zones.size() << " named zones found, plus " << auto_shown
+				<< " auto-disabled; switched " << g_zones_switched_on << " time(s) since load\n";
+			for (const EnabledZone& entry : g_enable_zone_list)
+			{
+				if (entry.is_auto)
+					continue;
 				out << "  " << entry.name << ": " << (ZoneField<bool>(entry.zone, "bEnabled") ? "enabled" : "DISABLED")
 					<< " (kept " << (entry.on ? "on" : "off") << ")\n";
+			}
+			if (auto_shown > 0)
+				out << "  (auto-disabled zones: " << kCmdList << " failing lists them)\n";
 		}
 		if (g_ocean_band.enabled)
 		{
@@ -2579,9 +2776,19 @@ namespace
 				if (!replaced)
 					wanted.emplace_back(name, false);
 			}
+			const size_t first_auto = wanted.size();   // AutoDisableZones' own list, after the map file's
+			for (const std::string& name : g_rules->auto_disabled_zones)
+			{
+				bool listed = false;
+				for (const auto& [existing, on] : wanted)
+					listed = listed || EqualsNoCase(existing, name);
+				if (!listed)
+					wanted.emplace_back(name, false);
+			}
 			if (wanted.empty())
 				return;
 			std::vector<bool> found(wanted.size(), false);
+			size_t zones_seen = 0;
 			auto& levels = world->LevelsField();
 			for (int32 l = 0; l < levels.Num(); ++l)
 			{
@@ -2594,6 +2801,7 @@ namespace
 					AActor* actor = actors[a];
 					if (actor == nullptr || !IsZoneManager(actor, g_zone_class_known))
 						continue;
+					++zones_seen;
 					ANPCZoneManager* zone = reinterpret_cast<ANPCZoneManager*>(actor);
 					const std::string name = ObjectName(zone);
 					for (size_t i = 0; i < wanted.size(); ++i)
@@ -2601,16 +2809,34 @@ namespace
 						if (!found[i] && EqualsNoCase(name, wanted[i].first))
 						{
 							found[i] = true;
-							g_enable_zone_list.push_back({ zone, name, wanted[i].second });
+							g_enable_zone_list.push_back({ zone, name, wanted[i].second, i >= first_auto });
 						}
 					}
 				}
 			}
+			std::vector<std::string> gone;   // auto-disabled zones no longer on the map (renamed by a game update)
 			for (size_t i = 0; i < found.size(); ++i)
 			{
-				if (!found[i])
+				if (found[i])
+					continue;
+				if (i >= first_auto)
+					gone.push_back(wanted[i].first);
+				else
 					Log::GetLog()->warn("{}: no spawn zone named {} on this map", wanted[i].second ? "EnableZones" : "DisableZones",
 						wanted[i].first);
+			}
+			// Only with the map's zones in view: a search that saw none must not empty the list.
+			if (!gone.empty() && zones_seen > 0 && g_rules != &g_settings.default_rules && !g_settings.auto_folder.empty())
+			{
+				// AutoDisableZones finds them again under their new names if they still fail.
+				MapRules& rules = const_cast<MapRules&>(*g_rules);
+				for (const std::string& name : gone)
+				{
+					Log::GetLog()->info("AutoDisableZones: {} is no longer on this map; dropped from {}", name, AutoAreasFileName(rules.name));
+					rules.auto_disabled_zones.erase(std::remove_if(rules.auto_disabled_zones.begin(), rules.auto_disabled_zones.end(),
+						[&](const std::string& listed) { return EqualsNoCase(listed, name); }), rules.auto_disabled_zones.end());
+				}
+				SaveAutoAreas();
 			}
 		}
 		for (const EnabledZone& entry : g_enable_zone_list)
@@ -2627,6 +2853,75 @@ namespace
 					: "DisableZones: {} was enabled again; switched back off", entry.name);
 			++g_zones_switched_on;
 		}
+	}
+
+	// After each census: zones that keep failing on their own (ShouldAutoDisableZone) are switched off and
+	// added to the DisableZones list of <Map>.auto.json, so they stay off after a restart.
+	void RunAutoDisableZones()
+	{
+		if (g_rules == nullptr || !g_rules->auto_disable.enabled || !g_zone_hook_installed)
+			return;
+		const char* reason = nullptr;
+		if (g_rules == &g_settings.default_rules)
+			reason = "this map has no map file of its own to keep auto-disabled zones for";
+		else if (g_settings.auto_folder.empty())
+			reason = "it needs a SharedConfig folder to keep <Map>.auto.json in";
+		if (reason != nullptr)
+		{
+			if (!g_auto_disable_warned)
+				Log::GetLog()->warn("AutoDisableZones is on for {} but {}; nothing switched off", g_rules->name, reason);
+			g_auto_disable_warned = true;
+			return;
+		}
+		MapRules& rules = const_cast<MapRules&>(*g_rules); // g_rules points into g_settings, which is not const
+		const auto listed = [&](const std::string& name) {
+			for (const std::vector<std::string>* list : { &rules.enable_zones, &rules.disable_zones, &rules.auto_disabled_zones })
+				for (const std::string& entry : *list)
+					if (EqualsNoCase(entry, name))
+						return true;
+			return false;
+		};
+		bool added = false;
+		for (const auto& [zone, calls] : g_zone_calls)
+		{
+			if (rules.auto_disabled_zones.size() >= static_cast<size_t>(rules.auto_disable.max_zones))
+			{
+				if (!g_auto_disable_warned)
+					Log::GetLog()->warn("AutoDisableZones: {} already holds MaxZones ({}); no more zones switched off",
+						AutoAreasFileName(rules.name), rules.auto_disable.max_zones);
+				g_auto_disable_warned = true;
+				break;
+			}
+			if (!ZoneField<bool>(zone, "bEnabled"))
+				continue;
+			const auto stats = g_zone_stats.find(zone);
+			if (stats != g_zone_stats.end() && stats->second.stopped)
+				continue;
+			const int64_t failures = ZoneField<int>(zone, "NumSpawnFailures") - calls.base_failures;
+			int64_t spawned = ZoneField<int>(zone, "NumNPCSpawned") - calls.base_spawned;
+			const auto churn = g_zone_churn.find(zone);
+			if (churn != g_zone_churn.end())
+				spawned = (std::max)(spawned, static_cast<int64_t>(churn->second.spawned));
+			const std::string name = ObjectName(zone);
+			if (!ShouldAutoDisableZone(rules.auto_disable, name, failures, spawned, calls.refused) || listed(name))
+				continue;
+			std::string entries;
+			TArray<FNPCSpawnEntry>& list = zone->NPCSpawnEntriesField();
+			for (int e = 0; e < list.Num() && e < 3; ++e)
+				entries += (e == 0 ? "\"" : ", \"") + EntryName(EntryAt(list, e)) + "\"";
+			if (list.Num() > 3)
+				entries += " +" + std::to_string(list.Num() - 3);
+			ZoneField<bool>(zone, "bEnabled") = false;
+			rules.auto_disabled_zones.push_back(name);
+			g_enable_zone_list.push_back({ zone, name, false, true });
+			++g_auto_zones_disabled;
+			added = true;
+			Log::GetLog()->info("AutoDisableZones: switched off {} ({} failed spawn passes since load, {} spawned; spawns {}){}", name,
+				failures, (std::max)(spawned, int64_t{ 0 }), entries.empty() ? std::string("nothing") : entries,
+				ZoneField<bool>(zone, "bOnlySpawnInWater") ? "; only in water" : "");
+		}
+		if (added)
+			SaveAutoAreas();
 	}
 
 	// Spawns one creature of a set at one of its points, with the game's own wild spawn.
@@ -2833,7 +3128,7 @@ namespace
 					bool match = lower(ObjectName(zone)).find(wanted) != std::string::npos;
 					TArray<FNPCSpawnEntry>& entries = zone->NPCSpawnEntriesField();
 					for (int e = 0; e < entries.Num() && !match; ++e)
-						match = lower(entries[e].AnEntryName.ToString()).find(wanted) != std::string::npos;
+						match = lower(EntryName(EntryAt(entries, e))).find(wanted) != std::string::npos;
 					if (!match)
 						continue;
 				}
@@ -2843,7 +3138,7 @@ namespace
 				auto& spawn_volumes = ZoneField<TArray<FLinkedZoneSpawnVolumeEntry>>(zone, "LinkedZoneSpawnVolumeEntries");
 				for (int v = 0; v < spawn_volumes.Num() && v < 64; ++v)
 				{
-					AActor* volume = reinterpret_cast<AActor*>(spawn_volumes[v].LinkedZoneSpawnVolume);
+					AActor* volume = reinterpret_cast<AActor*>(VolumeEntryAt(spawn_volumes, v).LinkedZoneSpawnVolume);
 					if (volume == nullptr)
 						continue;
 					const Box box = bounds_of(volume);
@@ -2959,7 +3254,7 @@ namespace
 			TArray<FNPCSpawnEntry>& entries = zone->NPCSpawnEntriesField();
 			text << "    entries " << entries.Num() << ":";
 			for (int e = 0; e < entries.Num() && e < 12; ++e)
-				text << (e == 0 ? " " : "; ") << "\"" << entries[e].AnEntryName.ToString() << "\" w" << entries[e].EntryWeight;
+				text << (e == 0 ? " " : "; ") << "\"" << EntryName(EntryAt(entries, e)) << "\" w" << EntryWeight(EntryAt(entries, e));
 			text << (entries.Num() > 12 ? "; ..." : "") << "\n";
 		}
 		return text.str();

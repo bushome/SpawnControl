@@ -200,6 +200,19 @@ namespace SpawnControl
 		int max_areas = 50;                // auto areas kept per map
 	};
 
+	// Failing zones (see IsFailingZone): judged on failed spawn passes since load.
+	constexpr int64_t kFailingZoneMinFailures = 100;   // failed passes since load before a zone is judged (~12 min)
+	constexpr int64_t kFailingZoneSpawnShare = 1000;   // ...and at most one spawn per this many failures
+
+	// AutoDisableZones: a zone that keeps failing every spawn pass on its own is switched off by itself, the
+	// same as a DisableZones entry, and kept in the DisableZones list of <Map>.auto.json. Off unless Enabled.
+	struct AutoDisableZoneRule
+	{
+		bool enabled = false;
+		int min_failed_passes = 500;       // failed passes since load before a zone is switched off (~1 h)
+		int max_zones = 100;               // auto-disabled zones kept per map
+	};
+
 	// SpawnPoints: creatures SpawnControl spawns itself, at points chosen by hand, for places the map's own
 	// spawn zones never fill (a cave a large creature does not fit the zone's random points in).
 	struct SpawnClass
@@ -348,10 +361,13 @@ namespace SpawnControl
 		// Spawn zones to switch off (same names), e.g. water-only zones that fail every spawn pass. A name in
 		// both lists is switched off. Checked again after every census.
 		std::vector<std::string> disable_zones;
+		// Zones AutoDisableZones switched off, read from and saved to <Map>.auto.json; kept off like DisableZones.
+		std::vector<std::string> auto_disabled_zones;
 		std::vector<SpawnPointSet> spawn_points;
 		OverlapRule overlap;
 		UnderMeshRule under_mesh;
 		AutoBlockRule auto_block;
+		AutoDisableZoneRule auto_disable;
 
 		// The JSON this section was read from: the Default section, and the map's own entries laid
 		// over it. Kept for the Rules command, which says where each value came from.
@@ -764,6 +780,29 @@ namespace SpawnControl
 				}
 			}
 
+			if (section.contains("AutoDisableZones"))
+			{
+				const nlohmann::json& auto_disable = section["AutoDisableZones"];
+				if (!auto_disable.is_object())
+					warnings.push_back(where + "AutoDisableZones must be an object with Enabled, MinFailedPasses and MaxZones; ignored");
+				else
+				{
+					if (auto_disable.contains("Enabled"))
+					{
+						if (auto_disable["Enabled"].is_boolean())
+							rules.auto_disable.enabled = auto_disable["Enabled"].get<bool>();
+						else
+							warnings.push_back(where + "AutoDisableZones.Enabled must be true or false; using false");
+					}
+					std::vector<std::string> number_warnings;
+					rules.auto_disable.min_failed_passes = ReadInt(auto_disable, "MinFailedPasses", rules.auto_disable.min_failed_passes,
+						static_cast<int>(kFailingZoneMinFailures), number_warnings);
+					rules.auto_disable.max_zones = ReadInt(auto_disable, "MaxZones", rules.auto_disable.max_zones, 1, number_warnings);
+					for (const std::string& warning : number_warnings)
+						warnings.push_back(where + "AutoDisableZones." + warning);
+				}
+			}
+
 			if (section.contains("SpawnPoints"))
 				rules.spawn_points = ReadSpawnPoints(section["SpawnPoints"], where + "SpawnPoints", warnings);
 
@@ -786,7 +825,7 @@ namespace SpawnControl
 		}
 
 		constexpr std::initializer_list<const char*> kMapKeys = { "Block", "Limit", "GroupLimit", "Density", "DensitySkip", "BlockAreas", "Overlap",
-			"UnderMesh", "AutoBlockRepeats", "EnableZones", "DisableZones", "SpawnPoints" };
+			"UnderMesh", "AutoBlockRepeats", "AutoDisableZones", "EnableZones", "DisableZones", "SpawnPoints" };
 
 		// Keys nobody reads are ignored by ARK-style configs without a word; here each one is a warning, with
 		// a hint when the key exists one level up or down.
@@ -842,6 +881,8 @@ namespace SpawnControl
 				WarnUnknown(map["Overlap"], { "Fraction", "Exclude" }, where + "Overlap.", warnings);
 			if (map.contains("AutoBlockRepeats"))
 				WarnUnknown(map["AutoBlockRepeats"], { "Enabled", "MinRemoved", "MaxRadiusInFoundations", "MaxAreas" }, where + "AutoBlockRepeats.", warnings);
+			if (map.contains("AutoDisableZones"))
+				WarnUnknown(map["AutoDisableZones"], { "Enabled", "MinFailedPasses", "MaxZones" }, where + "AutoDisableZones.", warnings);
 			if (map.contains("UnderMesh"))
 				WarnUnknown(map["UnderMesh"], { "ChecksPerSecond", "Remove", "RemoveNoGround", "IncludeStasis", "StopZones", "TraceGround", "IgnoreFoliage", "Exclude" }, where + "UnderMesh.", warnings);
 		}
@@ -1585,14 +1626,30 @@ namespace SpawnControl
 
 	// Failing zones: a zone that tries on every spawn pass and almost never manages it (a water-only zone
 	// whose volumes are mostly land, a zone whose volumes sit inside the mesh) pays for each attempt
-	// again: every failed pass runs its point checks and traces. Judged on what the zone gained since
-	// load, so counts carried over in the save don't flag a zone that has since recovered.
-	constexpr int64_t kFailingZoneMinFailures = 1000;  // failures since load before a zone is judged
-	constexpr int64_t kFailingZoneSpawnShare = 1000;   // ...and at most one spawn per this many failures
-
+	// again: every failed pass runs its point checks and traces. The game counts one failure per failed
+	// pass (NumSpawnFailures). Judged on what the zone gained since load, so counts carried over in the
+	// save don't flag a zone that has since recovered (thresholds: kFailingZoneMinFailures, kFailingZoneSpawnShare).
 	inline bool IsFailingZone(int64_t failures, int64_t spawned)
 	{
 		return failures >= kFailingZoneMinFailures && (std::max)(spawned, int64_t{ 0 }) * kFailingZoneSpawnShare <= failures;
+	}
+
+	// Time-of-day zones (NPCZoneManager_ToD_C) are a pair the game switches by day and night; static spawn
+	// points cannot stand in for them, so AutoDisableZones leaves them to DisableZones by hand.
+	inline bool IsTimeOfDayZone(const std::string& zone_name)
+	{
+		return zone_name.find("_ToD_") != std::string::npos;
+	}
+
+	// AutoDisableZones switches a zone off only when it fails on its own: failing (IsFailingZone) for at
+	// least MinFailedPasses, and never refused by SpawnControl this load (an entry refused because its
+	// creatures are at their limit, or a zone stopped by a block area, fails passes too, and must not be
+	// switched off for it).
+	inline bool ShouldAutoDisableZone(const AutoDisableZoneRule& rule, const std::string& zone_name, int64_t failures,
+		int64_t spawned, uint64_t refused_by_spawncontrol)
+	{
+		return rule.enabled && refused_by_spawncontrol == 0 && !IsTimeOfDayZone(zone_name) &&
+			failures >= rule.min_failed_passes && IsFailingZone(failures, spawned);
 	}
 
 	inline bool OverOnSpawn(const ClassRule& rule, int class_count, const std::vector<int>& group_counts,
@@ -1955,18 +2012,22 @@ namespace SpawnControl
 				settings.warnings.push_back(file + ": " + e.what() + "; its areas are not in force");
 				continue;
 			}
-			detail::WarnUnknown(body, { "BlockAreas" }, file + " ", settings.warnings);
-			if (!body.is_object() || !body.contains("BlockAreas"))
+			detail::WarnUnknown(body, { "BlockAreas", "DisableZones" }, file + " ", settings.warnings);
+			if (!body.is_object() || (!body.contains("BlockAreas") && !body.contains("DisableZones")))
 			{
-				settings.warnings.push_back(file + " needs a BlockAreas list; ignored");
+				settings.warnings.push_back(file + " needs a BlockAreas or DisableZones list; ignored");
 				continue;
 			}
-			detail::WarnUnknownAreas(body["BlockAreas"], file + " BlockAreas", settings.warnings);
-			for (BlockArea& area : detail::ReadAreas(body["BlockAreas"], file + " BlockAreas", settings.warnings))
+			if (body.contains("BlockAreas"))
 			{
-				area.is_auto = true;
-				target->block_areas.push_back(std::move(area));
+				detail::WarnUnknownAreas(body["BlockAreas"], file + " BlockAreas", settings.warnings);
+				for (BlockArea& area : detail::ReadAreas(body["BlockAreas"], file + " BlockAreas", settings.warnings))
+				{
+					area.is_auto = true;
+					target->block_areas.push_back(std::move(area));
+				}
 			}
+			target->auto_disabled_zones = detail::ReadStrings(body, "DisableZones", {}, settings.warnings, file + " ");
 			sources.push_back(detail::Utf8FromPath(path));
 		}
 		settings.sources = std::move(sources);
@@ -2212,8 +2273,8 @@ namespace SpawnControl
 	}
 
 	// The contents of <Map>.auto.json: that map's auto areas, in the BlockAreas format so they can be edited
-	// or moved into the map file by hand.
-	inline nlohmann::json AutoAreasJson(const std::vector<BlockArea>& areas)
+	// or moved into the map file by hand, and the zones AutoDisableZones switched off (only when there are any).
+	inline nlohmann::json AutoAreasJson(const std::vector<BlockArea>& areas, const std::vector<std::string>& disabled_zones = {})
 	{
 		nlohmann::json list = nlohmann::json::array();
 		for (const BlockArea& area : areas)
@@ -2226,6 +2287,9 @@ namespace SpawnControl
 			list.push_back({ { "Name", area.name }, { "Location", location },
 				{ "RadiusInFoundations", static_cast<int>(std::llround(area.radius / kFoundation)) } });
 		}
-		return nlohmann::json{ { "BlockAreas", list } };
+		nlohmann::json out{ { "BlockAreas", list } };
+		if (!disabled_zones.empty())
+			out["DisableZones"] = disabled_zones;
+		return out;
 	}
 }
