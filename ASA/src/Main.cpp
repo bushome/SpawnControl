@@ -2848,6 +2848,9 @@ namespace
 			if (entry.on)
 				Log::GetLog()->info(g_zones_switched_on == 0 || search ? "EnableZones: switched on {} (it was disabled)"
 					: "EnableZones: {} was disabled again; switched back on", entry.name);
+			else if (entry.is_auto)
+				Log::GetLog()->info(g_zones_switched_on == 0 || search ? "AutoDisableZones: kept off {} (in the auto list; it was enabled)"
+					: "AutoDisableZones: {} was enabled again; switched back off", entry.name);
 			else
 				Log::GetLog()->info(g_zones_switched_on == 0 || search ? "DisableZones: switched off {} (it was enabled)"
 					: "DisableZones: {} was enabled again; switched back off", entry.name);
@@ -2903,7 +2906,8 @@ namespace
 			if (churn != g_zone_churn.end())
 				spawned = (std::max)(spawned, static_cast<int64_t>(churn->second.spawned));
 			const std::string name = ObjectName(zone);
-			if (!ShouldAutoDisableZone(rules.auto_disable, name, failures, spawned, calls.refused) || listed(name))
+			if (!ShouldAutoDisableZone(rules.auto_disable, name, failures, spawned, calls.base_failures, calls.base_spawned, calls.refused) ||
+				listed(name))
 				continue;
 			std::string entries;
 			TArray<FNPCSpawnEntry>& list = zone->NPCSpawnEntriesField();
@@ -2916,8 +2920,8 @@ namespace
 			g_enable_zone_list.push_back({ zone, name, false, true });
 			++g_auto_zones_disabled;
 			added = true;
-			Log::GetLog()->info("AutoDisableZones: switched off {} ({} failed spawn passes since load, {} spawned; spawns {}){}", name,
-				failures, (std::max)(spawned, int64_t{ 0 }), entries.empty() ? std::string("nothing") : entries,
+			Log::GetLog()->info("AutoDisableZones: switched off {} ({} failed spawn passes since load, {} spawned; before load {} failed, {} spawned; spawns {}){}", name,
+				failures, (std::max)(spawned, int64_t{ 0 }), calls.base_failures, calls.base_spawned, entries.empty() ? std::string("nothing") : entries,
 				ZoneField<bool>(zone, "bOnlySpawnInWater") ? "; only in water" : "");
 		}
 		if (added)
@@ -3264,18 +3268,31 @@ namespace
 	{
 		if (AShooterPlayerController* admin = AdminFrom(controller))
 		{
+			// [fdn] [text]: a radius alone is capped at 300 foundations; with a text filter the whole map is
+			// searched unless a radius is given (rows are capped at 12 either way).
 			int radius = 30;
+			bool radius_given = false;
 			std::string filter;
 			std::istringstream words(CommandArgument(command));
 			std::string word;
 			while (words >> word)
 			{
 				bool number = !word.empty() && std::all_of(word.begin(), word.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
-				if (number && word.size() < 6)
-					radius = (std::max)(1, (std::min)(std::stoi(word), 300));
+				if (number && word.size() <= 6)
+				{
+					radius = (std::max)(1, std::stoi(word));
+					radius_given = true;
+				}
 				else
 					filter = word;
 			}
+			constexpr int kWholeMap = 100000; // foundations: wider than any map
+			if (filter.empty())
+				radius = (std::min)(radius, 300);
+			else if (!radius_given)
+				radius = kWholeMap;
+			else
+				radius = (std::min)(radius, kWholeMap);
 			const std::string text = ZonesHereText(AsaApi::IApiUtils::GetPosition(admin), radius, filter);
 			Log::GetLog()->info("Zones:\n{}", text);
 			SendAdmin(admin, text);

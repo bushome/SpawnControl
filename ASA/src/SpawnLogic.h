@@ -1641,15 +1641,21 @@ namespace SpawnControl
 		return zone_name.find("_ToD_") != std::string::npos;
 	}
 
-	// AutoDisableZones switches a zone off only when it fails on its own: failing (IsFailingZone) for at
-	// least MinFailedPasses, and never refused by SpawnControl this load (an entry refused because its
-	// creatures are at their limit, or a zone stopped by a block area, fails passes too, and must not be
-	// switched off for it).
+	// AutoDisableZones switches a zone off only when it fails on its own, and has done so for more than
+	// this run:
+	// - since load: failing (IsFailingZone) for at least MinFailedPasses;
+	// - before load (the game's counters from the save, read at its first pass): the same, so a zone that
+	//   has spawned normally in the past is left alone. A zone whose area is already full also fails every
+	//   pass for a while (seen on The Island: 54 spawned against 1375 failures, 73 creatures in a zone with
+	//   a target of 37); its lifetime record shows it works. On a fresh save nothing qualifies in the first run;
+	// - never refused by SpawnControl this load (an entry refused because its creatures are at their limit,
+	//   or a zone stopped by a block area, fails passes too, and must not be switched off for it).
 	inline bool ShouldAutoDisableZone(const AutoDisableZoneRule& rule, const std::string& zone_name, int64_t failures,
-		int64_t spawned, uint64_t refused_by_spawncontrol)
+		int64_t spawned, int64_t failures_before_load, int64_t spawned_before_load, uint64_t refused_by_spawncontrol)
 	{
 		return rule.enabled && refused_by_spawncontrol == 0 && !IsTimeOfDayZone(zone_name) &&
-			failures >= rule.min_failed_passes && IsFailingZone(failures, spawned);
+			failures >= rule.min_failed_passes && IsFailingZone(failures, spawned) &&
+			failures_before_load >= rule.min_failed_passes && IsFailingZone(failures_before_load, spawned_before_load);
 	}
 
 	inline bool OverOnSpawn(const ClassRule& rule, int class_count, const std::vector<int>& group_counts,

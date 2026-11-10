@@ -20,7 +20,8 @@ SpawnControl.Zones [foundations] [text]
 
 Console only. Lists the spawn zones whose spawn volumes come within that many foundations of you (default 30,
 up to 300), nearest first, at most 12. With `text`, only zones whose name or entry names contain it
-(`SpawnControl.Zones 80 wyvern`). Per zone:
+(`SpawnControl.Zones 80 wyvern`); with `text` and no number, the whole map is searched, so a zone can be
+looked up by name from anywhere (`SpawnControl.Zones Land_309`). Per zone:
 
 - its target (`UseDesiredNumberOfNPC`, with MinDesired, Max and multiplier);
 - the game's own counters: total spawned over the server's life and failed spawn placements;
@@ -80,6 +81,11 @@ After each census, a zone is switched off when all of these hold:
 
 - it is failing (see `List`'s **Failing zones**: at most one spawn per 1000 failed passes) and has failed at
   least `MinFailedPasses` spawn passes since load (default 500, about an hour; at least 100);
+- its record from before this load (the game's counters in the save) is just as bad: at least `MinFailedPasses`
+  failures and at most one spawn per 1000. A zone whose area is already full also fails every pass for a while
+  (on The Island, a zone with 73 creatures in its volume against a target of 37 did), but its past spawns show it
+  works, so it is left alone. In practice a zone has to fail across two server runs, and on a fresh save nothing
+  is switched off in the first run;
 - SpawnControl never refused one of its entries this load. An entry refused because its creatures are at their
   limit, or a zone stopped by a block area, fails passes too; those zones are never switched off for it;
 - it is not a time-of-day zone (`NPCZoneManager_ToD_C`): the game switches those in day/night pairs and spawn

@@ -1072,17 +1072,22 @@ static void TestChurnAndSources()
 	CHECK(IsFailingZone(2176, 0) && !IsFailingZone(500, 1));               // test server, ~4 h after boot; one spawn early on
 	CHECK(IsFailingZone(5000, -3));                                         // a falling spawn counter counts as none
 
-	// AutoDisableZones: off unless enabled; only zones failing on their own, never time-of-day zones.
+	// AutoDisableZones: off unless enabled; only zones failing on their own, this run and before it (the
+	// save's counters), never time-of-day zones.
 	AutoDisableZoneRule auto_off;
-	CHECK(!ShouldAutoDisableZone(auto_off, "NPCZoneManager_UAID_1", 5000, 0, 0));
+	CHECK(!ShouldAutoDisableZone(auto_off, "NPCZoneManager_UAID_1", 5000, 0, 3100000, 0, 0));
 	AutoDisableZoneRule auto_on;
 	auto_on.enabled = true;
-	CHECK(ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 500, 0, 0));
-	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 499, 0, 0));           // not long enough yet
-	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 5000, 6, 0));          // spawns now and then
-	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 5000, 0, 1));          // SpawnControl refused an entry
-	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_ToD_C_UAID_581122A0FE1446E302_1332763608", 185000, 4, 0));
-	CHECK(ShouldAutoDisableZone(auto_on, "BeeRedwood_UAID_D8BBC1D07AAAB3AA02_1365357603", 2176, 0, 0));
+	CHECK(ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 500, 0, 3100000, 0, 0));      // the Lost Colony plaza water zones
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 499, 0, 3100000, 0, 0));     // not long enough yet
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 5000, 6, 3100000, 0, 0));    // spawns now and then
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 5000, 0, 3100000, 0, 1));    // SpawnControl refused an entry
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_ToD_C_UAID_581122A0FE1446E302_1332763608", 185000, 4, 185000, 4, 0));
+	CHECK(ShouldAutoDisableZone(auto_on, "BeeRedwood_UAID_D8BBC1D07AAAB3AA02_1365357603", 2176, 0, 3100000, 19, 0));
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManagerBlueprint_Land_309", 870, 0, 505, 54, 0));  // a full zone with a working past (The Island)
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManagerBlueprint_Cave_88", 530, 0, 509, 68, 0));
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 5000, 0, 0, 0, 0));          // fresh save: not in its first run
+	CHECK(!ShouldAutoDisableZone(auto_on, "NPCZoneManager_UAID_1", 5000, 0, 499, 0, 0));        // too little history before load
 	CHECK(IsTimeOfDayZone("NPCZoneManager_ToD_C_UAID_1") && !IsTimeOfDayZone("NPCZoneManager_UAID_1"));
 
 	CHECK(ParseConfigText(R"({})").churn_removed == kChurnRemoved);

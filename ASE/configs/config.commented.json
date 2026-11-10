@@ -1,4 +1,6 @@
-// SpawnControl config. Same values as config.json, with comments. Comments are allowed in config.json too.
+// SpawnControl config reference: every setting, with comments. The General, Protect, Refresh and
+// ReportFamilies values and the LostColony Block/Limit/GroupLimit are what config.json ships with; the other
+// map settings below are examples to copy into your own map sections. Comments are allowed in config.json too.
 // Reload after editing with SpawnControl.Reload (admin console or RCON).
 //
 // To share one config between servers, this file can instead hold only
@@ -131,11 +133,6 @@
           { "Name": "City", "Location": [ 0, 0, 0 ], "RadiusInFoundations": 100 }
         ]
       },
-      // Where no wild creature belongs, e.g. around a misplaced spawner or under the map. Every wild creature
-      // inside is removed whatever its class (tames, mission and protected creatures excepted). A zone that
-      // puts 3 creatures inside and none anywhere else has its spawn entries refused from then on, so it
-      // stops spawning instead of refilling. With [x, y, z] the area is a sphere, so the ground above an
-      // underground spot is untouched; with [x, y] it is a column at any height.
       // Creatures spawned inside one another: two overlap when their centres are closer than Fraction of
       // their summed collision radii. The one nearest a player stays, the rest are removed. Riders and
       // carried creatures are never counted. Leave the key out to turn this off.
@@ -168,9 +165,17 @@
         "IgnoreFoliage": true,
         "Exclude": []
       },
+      // Where no wild creature belongs, e.g. around a misplaced spawner or under the map. Every wild creature
+      // inside is removed whatever its class (tames, mission and protected creatures excepted). A zone that
+      // puts 3 creatures inside and none anywhere else has its spawn entries refused from then on, so it
+      // stops spawning instead of refilling. With [x, y, z] the area is a sphere, so the ground above an
+      // underground spot is untouched; with [x, y] it is a column at any height.
       "BlockAreas": [
         { "Name": "Misplaced spawner", "Location": [ 0, 0, -60000 ], "RadiusInFoundations": 30 }
-      ]
+      ],
+      // Repeat spots of under-mesh removals become block areas by themselves, saved to <Map>.auto.json in the
+      // SharedConfig folder (needs UnderMesh Remove and a map file). Off unless Enabled.
+      "AutoBlockRepeats": { "Enabled": false, "MinRemoved": 5, "MaxRadiusInFoundations": 15, "MaxAreas": 50 }
     }
   }
 }
