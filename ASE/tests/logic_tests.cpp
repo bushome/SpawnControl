@@ -1041,6 +1041,34 @@ static void TestMeshZoneStop()
 	CHECK(bad.maps[0].under_mesh.stop_zones && AnyContains(bad.warnings, "StopZones must be true or false; using true"));
 }
 
+static void TestUnderpopulation()
+{
+	UsualCount u;
+	CHECK(UpdateUsualCount(u, 200, 0, 1) == UsualChange::None && u.usual == 200);      // first census sets it
+	for (int i = 2; i < kUsualWarmupCensuses; ++i)
+		CHECK(UpdateUsualCount(u, 50, 60, i) == UsualChange::None);                   // warm-up: never reported
+	CHECK(u.usual > 190 && !u.low);                                                     // a slow average barely moves
+	CHECK(UpdateUsualCount(u, 50, 60, kUsualWarmupCensuses) == UsualChange::BecameLow && u.low);
+	const double held = u.usual;
+	for (int i = 0; i < 100; ++i)
+		CHECK(UpdateUsualCount(u, 50, 60, 100 + i) == UsualChange::None);
+	CHECK(u.usual == held && u.low);                                                    // held while low
+	CHECK(UpdateUsualCount(u, static_cast<int>(held * 0.6), 60, 300) == UsualChange::None && u.low);   // not yet recovered
+	CHECK(UpdateUsualCount(u, static_cast<int>(held * 0.8), 60, 301) == UsualChange::Recovered && !u.low);
+
+	UsualCount rare;
+	UpdateUsualCount(rare, 20, 0, 1);
+	CHECK(UpdateUsualCount(rare, 0, 60, kUsualWarmupCensuses + 1) == UsualChange::None && !rare.low);  // usual under 30
+
+	UsualCount steady;
+	UpdateUsualCount(steady, 100, 0, 1);
+	CHECK(UpdateUsualCount(steady, 60, 60, kUsualWarmupCensuses + 1) == UsualChange::None && !steady.low);  // 60% is fine
+	UsualCount day;
+	UpdateUsualCount(day, 100, 0, 1);
+	UpdateUsualCount(day, 0, kUsualHours * 3600, 2);
+	CHECK(day.usual > 36 && day.usual < 38);                                            // one time constant: 1/e left
+}
+
 static void TestChurnAndSources()
 {
 	ChurnWindow window;
@@ -1188,6 +1216,7 @@ int main(int argc, char** argv)
 	TestSpawnPoints();
 	TestMeshZoneStop();
 	TestChurnAndSources();
+	TestUnderpopulation();
 
 	if (argc > 1)
 		TestConfigFile(argv[1], argc > 2 && std::string(argv[2]) == "--shipped");

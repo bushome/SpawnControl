@@ -26,7 +26,7 @@ The first lines are the quick health check:
 
 Then, in order: rolling refresh total; spawn-check timing and per-tick time spent on census slices and
 removals (average and worst, in ms); zone entries checked and refused; zones held back for churning and the
-unheld zones feeding the most removals; every limited or blocked class and every group with its count now and
+unheld zones feeding the most removals; underpopulated classes; every limited or blocked class and every group with its count now and
 each member's count; the density rules with the 10 fullest cubes each found last census, one per spot (count,
 location for `setplayerpos`, top classes); under-mesh results, repeat spots, stopped zones and block areas
 (auto areas marked `(auto)`); on ASA, spawn points, failing zones, auto-disabled zones (count; `List failing`
@@ -42,6 +42,14 @@ these are FPS drains worth switching off with `DisableZones`, or automatically w
 [Zones and spawn points](zones-and-spawn-points.md#disablezones). `SpawnControl.List failing` also lists the
 zones `AutoDisableZones` has switched off. The section only appears when a zone
 qualifies, and counts start at load, so give the map a while after a restart.
+
+**Underpopulated classes** (report only) lists classes whose count has fallen below half their usual count,
+for example after the zones that spawned them were switched off, stopped or held back. The usual count is a slow
+moving average (48-hour time constant) of what each census leaves after its planned removals, so a limited class
+is never "usual" above its limit; it is held while the class is low, so a lasting drop keeps showing. Classes
+usually under 30 are left out, and nothing is reported in the first 60 censuses (about an hour) after load or a
+reload, which start it over. The log has one `Underpopulated:` line when a class drops and one when it is back to
+three quarters. Protected and blocked classes are skipped.
 
 Counts are the last census minus what it queued for removal, plus spawns since. Max values are kept since
 load.

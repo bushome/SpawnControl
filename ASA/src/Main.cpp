@@ -140,6 +140,10 @@ namespace
 	// Live counts: set by each finished census, adjusted by spawns and removals in between.
 	bool g_counts_ready = false;
 	std::vector<int> g_class_counts;
+	// Usual count per class for the underpopulation report (see UpdateUsualCounts).
+	std::vector<UsualCount> g_usual;
+	int g_usual_censuses = 0;
+	Clock::time_point g_usual_last{};
 	std::vector<int> g_group_counts;
 
 	// Wild spawns the hook counted while a census was running. The census result replaces the live
@@ -691,6 +695,8 @@ namespace
 		g_queued.clear();
 		g_zone_stats.clear(); // block areas may have changed; stopped zones are learned again
 		g_mesh_queue.clear(); // classes may have left the under-mesh rule; the next census queues again
+		g_usual.clear(); // rules changed: usual counts start over
+		g_usual_censuses = 0;
 		g_zones_stopped = 0;
 		g_mesh_zones_stopped = 0;
 		// g_zone_churn is kept: clearing it let every churning zone run free until it was learned again.
@@ -1208,6 +1214,56 @@ namespace
 	const SpawnEntryLayout& SpawnEntryOffsets();
 	void RunAutoDisableZones();
 
+	// Underpopulation (report only; see UsualCount): logs a class that falls below half its usual count, and
+	// again when it recovers. List shows the classes low now. Protected and blocked classes are skipped.
+	void UpdateUsualCounts(const std::vector<int>& counts)
+	{
+		const auto now = Clock::now();
+		const double seconds = g_usual_censuses > 0 ? std::chrono::duration<double>(now - g_usual_last).count() : 0.0;
+		g_usual_last = now;
+		++g_usual_censuses;
+		if (g_usual.size() < counts.size())
+			g_usual.resize(counts.size());
+		for (size_t c = 0; c < counts.size() && c < g_classes.size(); ++c)
+		{
+			if (g_classes[c].rule.is_protected || g_classes[c].rule.blocked)
+				continue;
+			const double usual = g_usual[c].usual;
+			switch (UpdateUsualCount(g_usual[c], counts[c], seconds, g_usual_censuses))
+			{
+			case UsualChange::BecameLow:
+				Log::GetLog()->warn("Underpopulated: {} at {}, usually {:.0f} (report only)", g_classes[c].info.short_name, counts[c], usual);
+				break;
+			case UsualChange::Recovered:
+				Log::GetLog()->info("Underpopulated no more: {} back to {}, usually {:.0f}", g_classes[c].info.short_name, counts[c], usual);
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
+	void AppendUnderpopulated(std::ostringstream& out)
+	{
+		std::vector<std::pair<double, size_t>> low;
+		for (size_t c = 0; c < g_usual.size() && c < g_classes.size(); ++c)
+		{
+			if (g_usual[c].low && g_usual[c].usual > 0)
+			{
+				const int now = c < g_class_counts.size() ? g_class_counts[c] : 0;
+				low.emplace_back(now / g_usual[c].usual, c);
+			}
+		}
+		if (low.empty())
+			return;
+		std::sort(low.begin(), low.end());
+		out << "Underpopulated classes (report only; below " << static_cast<int>(kUnderpopulatedShare * 100) << "% of their usual count, usual "
+			<< kUsualMinCount << "+, reported again at " << static_cast<int>(kRecoveredShare * 100) << "%): " << low.size() << "\n";
+		for (const auto& [share, c] : low)
+			out << "  " << g_classes[c].info.short_name << ": " << (c < g_class_counts.size() ? g_class_counts[c] : 0) << " now, usually "
+				<< static_cast<int>(g_usual[c].usual + 0.5) << " (" << static_cast<int>(share * 100 + 0.5) << "%)\n";
+	}
+
 	void FinishCensus()
 	{
 		g_census_running = false;
@@ -1291,6 +1347,7 @@ namespace
 		g_building.overlap_samples = plan.overlap_samples;
 
 		++g_census_number;
+		UpdateUsualCounts(plan.class_counts);
 		if (g_census_number == 1)
 		{
 			// Logs whether the game's spawn structs still match the API headers (see GameStride).
@@ -2376,6 +2433,7 @@ namespace
 		// plus spawns since. A census count over a limit would only show what is already on its way out.
 		const bool live = g_counts_ready;
 		auto count_now = [&](size_t c) { return live && c < g_class_counts.size() ? g_class_counts[c] : g_last.wild_by_class[c]; };
+		AppendUnderpopulated(out);
 		out << (live ? "Ruled classes (now, after queued removals):\n" : "Ruled classes (last census):\n");
 		for (size_t c = 0; c < g_classes.size() && c < g_last.wild_by_class.size(); ++c)
 		{

@@ -213,6 +213,53 @@ namespace SpawnControl
 		int max_zones = 100;               // auto-disabled zones kept per map
 	};
 
+	// Underpopulation (report only): a class whose count falls well below its own usual count, e.g. after
+	// the zones that spawned it were switched off, stopped or held. The usual count is a slow moving average
+	// of what each census leaves after its planned removals (so a limited class is never "usual" above its
+	// limit). It is held while the class is low, so a lasting drop keeps showing instead of becoming the new
+	// usual. Starts over at load and on every reload.
+	constexpr int kUsualMinCount = 30;            // classes usually below this are never reported
+	constexpr double kUsualHours = 48;            // time constant of the moving average
+	constexpr double kUnderpopulatedShare = 0.5;  // reported below half the usual count...
+	constexpr double kRecoveredShare = 0.75;      // ...until back to three quarters of it
+	constexpr int kUsualWarmupCensuses = 60;      // censuses after load or a reload before anything is reported
+
+	struct UsualCount
+	{
+		double usual = -1;  // < 0 until the class's first census
+		bool low = false;
+	};
+
+	enum class UsualChange { None, BecameLow, Recovered };
+
+	// One census: `count` is the class's count after planned removals, `seconds` the time since the previous
+	// census, `censuses` how many censuses have run since load or the last reload, this one included.
+	inline UsualChange UpdateUsualCount(UsualCount& usual, int count, double seconds, int censuses)
+	{
+		if (usual.usual < 0)
+		{
+			usual.usual = (std::max)(count, 0);
+			return UsualChange::None;
+		}
+		if (usual.low)
+		{
+			if (count >= usual.usual * kRecoveredShare)
+			{
+				usual.low = false;
+				return UsualChange::Recovered;
+			}
+			return UsualChange::None;  // held while low
+		}
+		if (censuses >= kUsualWarmupCensuses && usual.usual >= kUsualMinCount && count < usual.usual * kUnderpopulatedShare)
+		{
+			usual.low = true;
+			return UsualChange::BecameLow;
+		}
+		const double alpha = 1.0 - std::exp(-(std::max)(seconds, 0.0) / (kUsualHours * 3600.0));
+		usual.usual += alpha * ((std::max)(count, 0) - usual.usual);
+		return UsualChange::None;
+	}
+
 	// SpawnPoints: creatures SpawnControl spawns itself, at points chosen by hand, for places the map's own
 	// spawn zones never fill (a cave a large creature does not fit the zone's random points in).
 	struct SpawnClass
