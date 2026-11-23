@@ -51,6 +51,17 @@
 
 namespace
 {
+	// General.Logging = false silences every line this plugin writes to the API log and the console.
+	bool g_logging_enabled = true;
+
+	struct GatedLog
+	{
+		template <typename... Args> void info(Args&&... args) const { if (g_logging_enabled) Log::GetLog()->info(std::forward<Args>(args)...); }
+		template <typename... Args> void warn(Args&&... args) const { if (g_logging_enabled) Log::GetLog()->warn(std::forward<Args>(args)...); }
+		template <typename... Args> void error(Args&&... args) const { if (g_logging_enabled) Log::GetLog()->error(std::forward<Args>(args)...); }
+	};
+	const GatedLog* PluginLog() { static const GatedLog gate; return &gate; }
+
 	using namespace SpawnControl;
 	using Clock = std::chrono::steady_clock;
 
@@ -554,15 +565,15 @@ namespace
 		}
 		g_auto_block_warned = false;
 		if (g_map_known && g_rules != nullptr && !g_rules->enable_zones.empty())
-			Log::GetLog()->warn("EnableZones is not built for ASE yet; ignored for {}", g_rules->name);
+			PluginLog()->warn("EnableZones is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && g_rules != nullptr && !g_rules->disable_zones.empty())
-			Log::GetLog()->warn("DisableZones is not built for ASE yet; ignored for {}", g_rules->name);
+			PluginLog()->warn("DisableZones is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && g_rules != nullptr && (g_rules->auto_disable.enabled || !g_rules->auto_disabled_zones.empty()))
-			Log::GetLog()->warn("AutoDisableZones is not built for ASE yet; ignored for {}", g_rules->name);
+			PluginLog()->warn("AutoDisableZones is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && g_rules != nullptr && !g_rules->spawn_points.empty())
-			Log::GetLog()->warn("SpawnPoints is not built for ASE yet; ignored for {}", g_rules->name);
+			PluginLog()->warn("SpawnPoints is not built for ASE yet; ignored for {}", g_rules->name);
 		if (g_map_known && !was_known)
-			Log::GetLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
+			PluginLog()->info("Map {}: using section {} ({})", g_map_name, g_rules != nullptr ? g_rules->name : std::string("none"),
 				g_section_source);
 
 		// A queued removal was planned under the old rules. Live counts treat queued creatures as gone,
@@ -639,12 +650,13 @@ namespace
 		try
 		{
 			Settings settings = LoadSettings();
+			g_logging_enabled = settings.logging; // before the warnings below, so they honour it too
 			for (const std::string& warning : settings.warnings)
-				Log::GetLog()->warn("Config: {}", warning);
+				PluginLog()->warn("Config: {}", warning);
 			g_settings = std::move(settings);
 			g_settings_loaded = true;
 			ApplyRules();
-			Log::GetLog()->info("Config loaded from {}: {} map section(s){}; using {} for {}", SummarizeSources(g_settings.sources),
+			PluginLog()->info("Config loaded from {}: {} map section(s){}; using {} for {}", SummarizeSources(g_settings.sources),
 				g_settings.maps.size(), g_settings.has_default ? " and Default" : "",
 				g_rules != nullptr ? g_rules->name : std::string("no section"), g_section_source);
 			return true;
@@ -711,14 +723,14 @@ namespace
 		if (g_mesh_unlogged_this_minute > 0)
 		{
 			if (g_settings.log_removals)
-				Log::GetLog()->info("Under mesh: {} more removed in the last {} s without a line each; {} shows where they cluster",
+				PluginLog()->info("Under mesh: {} more removed in the last {} s without a line each; {} shows where they cluster",
 					g_mesh_unlogged_this_minute, kLogIntervalSeconds, kCmdList);
 			g_mesh_unlogged_this_minute = 0;
 		}
 		if (!g_refused_since_log.empty())
 		{
 			if (g_settings.log_removals)
-				Log::GetLog()->info("Spawn entries refused in the last {} s: {}", kLogIntervalSeconds, RefusedSummary());
+				PluginLog()->info("Spawn entries refused in the last {} s: {}", kLogIntervalSeconds, RefusedSummary());
 			g_refused_since_log.clear();
 		}
 		if (!g_refreshed_since_log.empty())
@@ -728,7 +740,7 @@ namespace
 				size_t total = 0;
 				for (const auto& [class_index, count] : g_refreshed_since_log)
 					total += count;
-				Log::GetLog()->info("Refreshed in the last {} s: {} wild creature(s) (rolling refresh, {} total)",
+				PluginLog()->info("Refreshed in the last {} s: {} wild creature(s) (rolling refresh, {} total)",
 					kLogIntervalSeconds, total, g_refreshed_total);
 			}
 			g_refreshed_since_log.clear();
@@ -749,7 +761,7 @@ namespace
 			std::ostringstream text;
 			for (size_t i = 0; i < rows.size(); ++i)
 				text << (i == 0 ? "" : ", ") << rows[i].first << " " << g_classes[rows[i].second].info.short_name;
-			Log::GetLog()->info("Removed in the last {} s: {} ({}); queue {}", kLogIntervalSeconds, total, text.str(),
+			PluginLog()->info("Removed in the last {} s: {} ({}); queue {}", kLogIntervalSeconds, total, text.str(),
 				g_queue.size());
 		}
 		g_removed_since_log.clear();
@@ -970,7 +982,7 @@ namespace
 		}
 		catch (const std::exception& e)
 		{
-			Log::GetLog()->error("AutoBlockRepeats: could not save {}: {}; the new areas hold until the next reload",
+			PluginLog()->error("AutoBlockRepeats: could not save {}: {}; the new areas hold until the next reload",
 				SpawnControl::detail::Utf8FromPath(path), e.what());
 		}
 	}
@@ -991,7 +1003,7 @@ namespace
 		if (reason != nullptr)
 		{
 			if (!g_auto_block_warned)
-				Log::GetLog()->warn("AutoBlockRepeats is on for {} but {}; nothing added", g_rules->name, reason);
+				PluginLog()->warn("AutoBlockRepeats is on for {} but {}; nothing added", g_rules->name, reason);
 			g_auto_block_warned = true;
 			return;
 		}
@@ -1039,7 +1051,7 @@ namespace
 				classes += (k == 0 ? "" : ", ") + std::to_string(spot.classes[k].first) + " " +
 					(kc >= 0 && static_cast<size_t>(kc) < g_classes.size() ? g_classes[kc].info.short_name : std::string("?"));
 			}
-			Log::GetLog()->info("AutoBlockRepeats: added block area \"{}\" at {:.0f} {:.0f} {:.0f}, {} foundations ({} removed there: {})",
+			PluginLog()->info("AutoBlockRepeats: added block area \"{}\" at {:.0f} {:.0f} {:.0f}, {} foundations ({} removed there: {})",
 				area.name, area.x, area.y, area.z, spot.radius_foundations, spot.count, classes);
 			// Removals inside the new area are done with: they must not seed another area next to it.
 			const std::vector<BlockArea> just_this{ area };
@@ -1072,10 +1084,10 @@ namespace
 			switch (UpdateUsualCount(g_usual[c], counts[c], seconds, g_usual_censuses))
 			{
 			case UsualChange::BecameLow:
-				Log::GetLog()->warn("Underpopulated: {} at {}, usually {:.0f} (report only)", g_classes[c].info.short_name, counts[c], usual);
+				PluginLog()->warn("Underpopulated: {} at {}, usually {:.0f} (report only)", g_classes[c].info.short_name, counts[c], usual);
 				break;
 			case UsualChange::Recovered:
-				Log::GetLog()->info("Underpopulated no more: {} back to {}, usually {:.0f}", g_classes[c].info.short_name, counts[c], usual);
+				PluginLog()->info("Underpopulated no more: {} back to {}, usually {:.0f}", g_classes[c].info.short_name, counts[c], usual);
 				break;
 			default:
 				break;
@@ -1172,7 +1184,7 @@ namespace
 		g_building.overlapping = plan.overlapping;
 		g_building.plan_ms = plan_ms;
 		if (plan_ms > 50)
-			Log::GetLog()->warn("Census planning took {:.0f} ms for {} creatures", plan_ms, creatures.size());
+			PluginLog()->warn("Census planning took {:.0f} ms for {} creatures", plan_ms, creatures.size());
 		g_building.overlap_samples = plan.overlap_samples;
 
 		++g_census_number;
@@ -1218,7 +1230,7 @@ namespace
 		PlanRefreshFromCensus();
 
 		if (plan.remove.size() > 0)
-			Log::GetLog()->info("Census: {} wild ({} summoned), {} mission; {} over the rules ({} blocked, {} over limit, {} over group, "
+			PluginLog()->info("Census: {} wild ({} summoned), {} mission; {} over the rules ({} blocked, {} over limit, {} over group, "
 				"{} too dense, {} overlapping, {} in block areas), {} newly queued, queue {}", g_last.wild, g_last.summoned, g_last.mission,
 				plan.remove.size(), plan.blocked, plan.over_limit, plan.over_group, plan.too_dense, plan.overlapping, plan.in_block_area,
 				newly_queued, g_queue.size());
@@ -1316,7 +1328,7 @@ namespace
 		stats.stopped = true;
 		stats.by_mesh = true;
 		++g_mesh_zones_stopped;
-		Log::GetLog()->warn("Zone {} had {} of its creatures removed under the mesh and {} test clear; its spawn entries are "
+		PluginLog()->warn("Zone {} had {} of its creatures removed under the mesh and {} test clear; its spawn entries are "
 			"refused from now on (last removal at {:.0f} {:.0f} {:.0f})", ObjectName(zone), stats.under, stats.clear, stats.x, stats.y,
 			stats.z);
 	}
@@ -1339,7 +1351,7 @@ namespace
 		{
 			stats.stopped = true;
 			++g_zones_stopped;
-			Log::GetLog()->warn("Zone {} spawned {} creatures only inside block area {}; its spawn entries are refused from now on "
+			PluginLog()->warn("Zone {} spawned {} creatures only inside block area {}; its spawn entries are refused from now on "
 				"(last one at {:.0f} {:.0f} {:.0f})", ObjectName(zone), stats.inside, stats.area.empty() ? std::string("(unnamed)") : stats.area,
 				stats.x, stats.y, stats.z);
 		}
@@ -1373,7 +1385,7 @@ namespace
 			std::string names;
 			for (int c : churn.classes)
 				names += (names.empty() ? "" : ", ") + g_classes[c].info.short_name;
-			Log::GetLog()->warn("Zone {}: {} of its last {} spawns were over a limit and removed on arrival ({}); its spawning is held "
+			PluginLog()->warn("Zone {}: {} of its last {} spawns were over a limit and removed on arrival ({}); its spawning is held "
 				"back while they are full (last one at {:.0f} {:.0f} {:.0f})", ObjectName(zone), churn.window.Removed(), kChurnWindow, names,
 				churn.x, churn.y, churn.z);
 		}
@@ -1512,7 +1524,7 @@ namespace
 		}
 		catch (const std::exception& exception)
 		{
-			Log::GetLog()->error("Spawn entry check failed: {}", exception.what());
+			PluginLog()->error("Spawn entry check failed: {}", exception.what());
 		}
 		const double us = std::chrono::duration<double, std::micro>(Clock::now() - start).count();
 		g_entry_total_us += us;
@@ -1562,7 +1574,7 @@ namespace
 		}
 		catch (const std::exception& exception)
 		{
-			Log::GetLog()->error("Spawn check failed: {}", exception.what());
+			PluginLog()->error("Spawn check failed: {}", exception.what());
 		}
 		const double us = std::chrono::duration<double, std::micro>(Clock::now() - start).count();
 		g_hook_total_us += us;
@@ -1640,7 +1652,7 @@ namespace
 			return;
 		}
 		++g_mesh_logged_this_minute;
-		Log::GetLog()->info("Under mesh: removing {} at {:.0f} {:.0f} {:.0f} (below on two censuses){}", g_classes[class_index].info.short_name,
+		PluginLog()->info("Under mesh: removing {} at {:.0f} {:.0f} {:.0f} (below on two censuses){}", g_classes[class_index].info.short_name,
 			static_cast<double>(location.X), static_cast<double>(location.Y), static_cast<double>(location.Z),
 			queued > 1 ? " with " + std::to_string(queued - 1) + " follower(s)" : std::string());
 	}
@@ -1771,7 +1783,7 @@ namespace
 			if (g_settings.log_removals && !g_rules->under_mesh.remove && g_mesh_logged_this_minute < kMeshLogsPerMinute)
 			{
 				++g_mesh_logged_this_minute;
-				Log::GetLog()->info("Under mesh: {} at {:.0f} {:.0f} {:.0f} ({}{}, hit {}; {})", g_classes[candidate.class_index].info.short_name,
+				PluginLog()->info("Under mesh: {} at {:.0f} {:.0f} {:.0f} ({}{}, hit {}; {})", g_classes[candidate.class_index].info.short_name,
 					suspect.x, suspect.y, suspect.z, overlapping ? "overlapping" : "below", in_stasis ? ", in stasis" : "", suspect.hit,
 					MeshHeights(suspect.hit_above, suspect.ground, suspect.ground_below));
 			}
@@ -1786,7 +1798,7 @@ namespace
 		}
 		catch (const std::exception& exception)
 		{
-			Log::GetLog()->error("Timer failed: {}", exception.what());
+			PluginLog()->error("Timer failed: {}", exception.what());
 		}
 	}
 
@@ -2178,7 +2190,7 @@ namespace
 		std::string error;
 		if (!ReloadSettings(error))
 		{
-			Log::GetLog()->error("Config reload failed: {}", error);
+			PluginLog()->error("Config reload failed: {}", error);
 			return "SpawnControl reload failed, old settings kept: " + error;
 		}
 		std::string text = "SpawnControl reloaded: section " + (g_rules != nullptr ? g_rules->name : std::string("none")) +
@@ -2313,7 +2325,7 @@ namespace
 				}
 			}
 			const std::string text = MeshHereText(ArkApi::IApiUtils::GetPosition(admin), radius);
-			Log::GetLog()->info("MeshHere:\n{}", text);
+			PluginLog()->info("MeshHere:\n{}", text);
 			SendAdmin(admin, text);
 		}
 	}
@@ -2332,7 +2344,7 @@ namespace
 		if (AShooterPlayerController* admin = AdminFrom(controller))
 		{
 			const std::string text = ListText(CommandArgument(command));
-			Log::GetLog()->info("List:\n{}", text);
+			PluginLog()->info("List:\n{}", text);
 			SendAdmin(admin, text);
 		}
 	}
@@ -2358,7 +2370,7 @@ namespace
 		if (AShooterPlayerController* admin = AdminFrom(controller))
 		{
 			const std::string text = RulesText();
-			Log::GetLog()->info("Rules:\n{}", text);
+			PluginLog()->info("Rules:\n{}", text);
 			SendAdmin(admin, text);
 		}
 	}
@@ -2366,7 +2378,7 @@ namespace
 	void RconRules(RCONClientConnection* connection, RCONPacket* packet, UWorld*)
 	{
 		const std::string text = RulesText();
-		Log::GetLog()->info("Rules:\n{}", text);
+		PluginLog()->info("Rules:\n{}", text);
 		RconReply(connection, packet, text);
 	}
 } // namespace
@@ -2379,24 +2391,24 @@ extern "C" __declspec(dllexport) void Plugin_Init()
 	std::string error;
 	if (!ReloadSettings(error))
 	{
-		Log::GetLog()->error("Config not loaded: {}", error);
-		Log::GetLog()->error("Nothing is limited until config.json is fixed and {} is run", kCmdReload);
+		PluginLog()->error("Config not loaded: {}", error);
+		PluginLog()->error("Nothing is limited until config.json is fixed and {} is run", kCmdReload);
 	}
 
 	g_entry_hook_installed = ArkApi::GetHooks().SetHook(kHookEntry,
 		reinterpret_cast<LPVOID>(&Hook_ANPCZoneManager_IsValidNPCEntry), &ANPCZoneManager_IsValidNPCEntry_original);
 	if (!g_entry_hook_installed)
-		Log::GetLog()->error("Could not hook {}; zones will keep spawning full classes for the queue to remove", kHookEntry);
+		PluginLog()->error("Could not hook {}; zones will keep spawning full classes for the queue to remove", kHookEntry);
 
 	g_hook_installed = ArkApi::GetHooks().SetHook(kHookBeginPlay,
 		reinterpret_cast<LPVOID>(&Hook_APrimalDinoCharacter_BeginPlay), &APrimalDinoCharacter_BeginPlay_original);
 	if (!g_hook_installed)
-		Log::GetLog()->error("Could not hook {}; only the census will enforce limits", kHookBeginPlay);
+		PluginLog()->error("Could not hook {}; only the census will enforce limits", kHookBeginPlay);
 
 	g_zone_hook_installed = ArkApi::GetHooks().SetHook(kHookZoneSpawn,
 		reinterpret_cast<LPVOID>(&Hook_ANPCZoneManager_SpawnNPCs), &ANPCZoneManager_SpawnNPCs_original);
 	if (!g_zone_hook_installed)
-		Log::GetLog()->error("Could not hook {}; summoned creatures cannot be told apart and are limited like the rest",
+		PluginLog()->error("Could not hook {}; summoned creatures cannot be told apart and are limited like the rest",
 			kHookZoneSpawn);
 
 	ArkApi::GetCommands().AddConsoleCommand(kCmdReload, &ConsoleReload);

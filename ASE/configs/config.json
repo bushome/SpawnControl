@@ -1,5 +1,6 @@
 {
   "General": {
+    "Logging": true,
     "RemovalsPerTick": 10,
     "CensusActorsPerTick": 5000,
     "CensusIntervalSeconds": 60,

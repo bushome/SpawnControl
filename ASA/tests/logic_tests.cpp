@@ -99,6 +99,10 @@ static void TestParsing()
 	CHECK(defaults.protected_paths.size() == 1 && defaults.protected_paths[0] == "/Missions/");
 	CHECK(defaults.maps.empty());
 
+	CHECK(Parse("{}").logging);
+	CHECK(!Parse(R"({ "General": { "Logging": false } })").logging);
+	CHECK(Parse(R"({ "General": { "Logging": "no" } })").logging); // not a boolean: default kept
+
 	const Settings bad = Parse(R"({
 		"General": { "RemovalsPerTick": 0, "CensusIntervalSeconds": "x", "LogRemovals": 1 },
 		"Maps": {

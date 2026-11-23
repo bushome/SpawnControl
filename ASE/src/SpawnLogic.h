@@ -434,6 +434,7 @@ namespace SpawnControl
 		int census_actors_per_tick = 5000;
 		int census_interval_seconds = 60;
 		double near_player_distance = 10000.0; // creatures closer than this to a player are removed last
+		bool logging = true;                   // false: nothing is written to the API log or console
 		bool log_removals = true;
 		bool refuse_full_entries = true;       // zones skip spawn entries whose creatures are all at their limit
 		bool ignore_summoned = true;           // creatures another creature summoned (escorts) are outside the rules
@@ -941,7 +942,7 @@ namespace SpawnControl
 				WarnUnknownMap(root["Default"], "Default.", warnings);
 			if (root.contains("General"))
 				WarnUnknown(root["General"], { "RemovalsPerTick", "CensusActorsPerTick", "CensusIntervalSeconds", "NearPlayerDistance",
-					"LogRemovals", "RefuseFullEntries", "IgnoreSummoned", "ChurnRemoved" }, "General.", warnings);
+					"Logging", "LogRemovals", "RefuseFullEntries", "IgnoreSummoned", "ChurnRemoved" }, "General.", warnings);
 			if (root.contains("Protect"))
 				WarnUnknown(root["Protect"], { "PathContains", "Families" }, "Protect.", warnings);
 			if (root.contains("Refresh"))
@@ -982,7 +983,8 @@ namespace SpawnControl
 		settings.census_actors_per_tick = detail::ReadInt(general, "CensusActorsPerTick", settings.census_actors_per_tick, 100, warnings);
 		settings.census_interval_seconds = detail::ReadInt(general, "CensusIntervalSeconds", settings.census_interval_seconds, 5, warnings);
 		settings.near_player_distance = detail::ReadInt(general, "NearPlayerDistance", static_cast<int>(settings.near_player_distance), 0, warnings);
-		for (const auto& [key, target] : { std::pair<const char*, bool*>{ "LogRemovals", &settings.log_removals },
+		for (const auto& [key, target] : { std::pair<const char*, bool*>{ "Logging", &settings.logging },
+				std::pair<const char*, bool*>{ "LogRemovals", &settings.log_removals },
 				std::pair<const char*, bool*>{ "RefuseFullEntries", &settings.refuse_full_entries },
 				std::pair<const char*, bool*>{ "IgnoreSummoned", &settings.ignore_summoned } })
 		{

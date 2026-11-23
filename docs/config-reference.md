@@ -75,6 +75,7 @@ written twice takes the later value. `SpawnControl.Rules` shows the merged resul
 | `RefuseFullEntries` | true | Let zones skip spawn entries whose creatures are all blocked or at their limit, and hold back zones that churn. See [Limits and churn](limits-and-churn.md#churn-guard). |
 | `ChurnRemoved` | 12 | How many of a zone's last 20 spawns must be removed on arrival before it is held back (1 to 20). See [Limits and churn](limits-and-churn.md#churn-guard). |
 | `IgnoreSummoned` | true | Leave creatures summoned by another creature out of every rule: a wild creature that appears after the first census without a spawn zone spawning it. They are counted in the census and shown in `List`. Limit the summoner instead. |
+| `Logging` | true | `false` turns off everything the plugin writes to the API log and the console, errors included, whatever `LogRemovals` says. Commands still answer in chat and RCON. |
 | `LogRemovals` | true | Once a minute, log how many creatures were removed and how many zone spawn entries were refused, by class. Once a class is at its limit, this shows how hard the zones still push for it. Also the under-mesh lines: up to 20 a minute name each removal (or, in report mode, each new suspect), and one line a minute counts the rest. With it off none of these are logged; `List` shows the same counts and spots either way. |
 
 ## Protect

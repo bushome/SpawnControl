@@ -13,6 +13,8 @@
 // what a server ends up with and where each value came from.
 {
   "General": {
+    // false: the plugin writes nothing at all to the API log or the console (errors included).
+    "Logging": true,
     // Creatures removed per second at most. Removals queue up and drain at this rate, so a large cull
     // never lands in one tick.
     "RemovalsPerTick": 10,
