@@ -84,6 +84,25 @@ written twice takes the later value. `SpawnControl.Rules` shows the merged resul
 |---|---|---|
 | `PathContains` | `["/Missions/"]` | Classes whose path contains any of these are never touched. |
 | `Families` | `[]` | Classes deriving from any of these are never touched, e.g. `Thrall_Character_BP_Base_C`. |
+| `Buffs` | `[]` when omitted. Shipped configs use `["/ShinyAscended/"]` on ASA and `["/Game/Mods/Shiny/"]` on ASE. | Wild creatures currently carrying any matching buff skip normal removal rules and rolling refresh, across all creature classes. Under-mesh checks and confirmed under-mesh removals still apply. Short buff class names also match derived buffs. Entries starting with `/` match a buff class path substring. Matching is case-insensitive. |
+
+The shipped Shiny entry matches buffs throughout the mod, including temporary effects on wild creatures.
+Add other buff class names or paths to `Protect.Buffs` as needed. This protects each creature carrying a
+matching buff while other creatures of the same species remain subject to the rules. Buff-protected creatures
+stay in the reported wild totals, but do not count
+toward limits, group limits, density or overlap. `SpawnControl.List` reports their census total and
+`SpawnControl.Rules` lists the configured buff matches. Block areas and the ASA ocean band also leave them alone.
+The live buff list is checked again before an ordinary queued removal or refresh.
+
+The mesh exception uses the existing `UnderMesh` settings, including report-only mode, class exclusions,
+cave exclusions and confirmation on two censuses. It does not override tame, mission, summoned or
+class/family protection. On ASA, a buff-protected follower needs its own mesh confirmation; following a
+creature under the mesh is not sufficient.
+
+Spawn-entry refusal happens before a creature exists, so it cannot inspect that creature's buffs.
+Class blocks and full limits can still prevent a spawn entry from being selected. Set
+`General.RefuseFullEntries` to `false` if these entries must be allowed to spawn so their buffs can be
+checked afterward. Buffs applied after `BeginPlay` are respected when the removal queue drains.
 
 ## Refresh
 
@@ -95,7 +114,7 @@ written twice takes the later value. `SpawnControl.Rules` shows the merged resul
 | `RecentDamageSeconds` | 300 | Never refresh a creature that took damage this recently. |
 | `SkipPathContains` | `["/Missions/", "Thrall", "Boss"]` | Classes whose path contains any of these are never refreshed. |
 
-Tamed, mission-owned and protected creatures are never refreshed. Refreshes are logged once a minute
+Tamed, mission-owned, class-protected and buff-protected creatures are never refreshed. Refreshes are logged once a minute
 (`Refreshed in the last 60 s`) and counted in `SpawnControl.List`. How the turnover works is in
 [How it works](how-it-works.md#the-cycle).
 

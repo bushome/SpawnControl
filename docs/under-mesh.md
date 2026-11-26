@@ -38,14 +38,17 @@ map. SpawnControl only takes its answer.
 | `IgnoreFoliage` | true | A creature whose test hits foliage is traced for ground and counted clear when ground is below it. |
 | `Exclude` | `[]` | Classes never tested; works as for `Density` (short names match derived classes, `/` entries match paths). Use it for burrowers and creatures that live inside rock (deathworms, basilisks, Nameless). |
 
-What is skipped: tames, mission and protected creatures, excluded classes; creatures the game flagged as spawned in a
+What is skipped: tames, mission and class-protected creatures, excluded classes; creatures the game flagged as spawned in a
 cave or in a block area; and, on ASA, places the mapmaker marked as allowed under the surface (caves and the
 like). The ASE API has no such exclusion zones, so on ASE check suspects in caves before trusting them.
+`Protect.Buffs` does not skip this test or confirmed mesh removals, including inside block areas that buff
+protection otherwise exempts. All other mesh exclusions and confirmation requirements still apply.
 
 **Removal is conservative.** A creature is queued only when the test finds it *below* the surface (not only
 overlapping, which a creature clipping a rock edge can show for a moment) on two separate censuses; a clear
 result in between starts over. On ASA, wild followers of a removed creature (young, pack members) are removed
-with it; the ASE API has no follower list, so there they are tested on their own.
+with it; buff-protected followers require their own mesh confirmation. The ASE API has no follower list,
+so there they are tested on their own.
 
 **Foliage.** A creature standing under a tree or bush can test as under, because the hit is the plant. With
 `IgnoreFoliage`, a hit on a `Foliage` component is traced for ground: with ground below the creature counts

@@ -180,6 +180,58 @@ static void TestResolve()
 	CHECK(!HasAnyRule(no_section));
 }
 
+static void TestBuffProtection()
+{
+	CHECK(Parse("{}").protected_buffs.empty());
+	const Settings settings = Parse(R"({ "Protect": { "Buffs": ["Buff_Event_C", "/MyMod/Buffs/"] } })");
+	CHECK(settings.warnings.empty());
+	CHECK(settings.protected_buffs.size() == 2);
+	CHECK(ExcludedBy(settings.protected_buffs, Class("/Game/Buffs/Buff_Event.Buff_Event_C")));
+	CHECK(ExcludedBy(settings.protected_buffs, Class("/Other/Buff_Child.Buff_Child_C", { "Buff_Event_C" })));
+	CHECK(ExcludedBy(settings.protected_buffs, Class("/mymod/buffs/Buff_Other.Buff_Other_C")));
+	CHECK(!ExcludedBy(settings.protected_buffs, Class("/Game/Buffs/Buff_Other.Buff_Other_C")));
+	const Settings bad = Parse(R"({ "Protect": { "Buffs": ["Buff_Event_C", 4, ""] } })");
+	CHECK(bad.protected_buffs.size() == 1 && bad.warnings.size() == 2);
+	const Settings wrong_type = Parse(R"({ "Protect": { "Buffs": "Buff_Event_C" } })");
+	CHECK(wrong_type.protected_buffs.empty() && wrong_type.warnings.size() == 1);
+
+	// Two individuals of the same class: only the one carrying the buff is exempt.
+	ClassRule rule;
+	rule.blocked = true;
+	rule.under_mesh = true;
+	Creature protected_creature{ 0, 0, 1000 };
+	protected_creature.buff_protected = true;
+	Creature ordinary{ 1, 0, 100 };
+	auto plan = PlanRemovals({ rule }, {}, { protected_creature, ordinary });
+	CHECK(plan.remove == std::vector<size_t>{ 1 } && plan.blocked == 1);
+	CHECK(!ResolveClass(settings, nullptr, kOtter).is_protected); // buff exemption is per individual
+	protected_creature.in_block_area = true;
+	plan = PlanRemovals({ rule }, {}, { protected_creature });
+	CHECK(plan.remove.empty() && plan.in_block_area == 0 && plan.class_counts[0] == 0);
+	protected_creature.in_block_area = false;
+	rule.blocked = false;
+	rule.limit = 1;
+	rule.groups = { 0 };
+	GroupRule group;
+	group.max = 1;
+	plan = PlanRemovals({ rule }, { group }, { protected_creature, ordinary });
+	CHECK(plan.remove.empty() && plan.class_counts[0] == 1 && plan.group_counts[0] == 1);
+
+	// Protected creatures neither trigger overlap nor consume density slots.
+	rule.overlap = true;
+	rule.density = { 0 };
+	protected_creature.radius = ordinary.radius = 100;
+	DensityRule density;
+	density.max = 1;
+	density.size = 1000;
+	plan = PlanRemovals({ rule }, { group }, { protected_creature, ordinary }, { density });
+	CHECK(plan.remove.empty() && plan.overlapping == 0 && plan.too_dense == 0);
+	// When the buff ends, the same individual is eligible again.
+	protected_creature.buff_protected = false;
+	plan = PlanRemovals({ rule }, { group }, { protected_creature, ordinary }, { density });
+	CHECK(plan.remove == std::vector<size_t>{ 0 } && plan.overlapping == 1);
+}
+
 static void TestPlan()
 {
 	// Classes: 0 otter (limit 3, group), 1 s-otter (group), 2 blocked, 3 protected, 4 free
@@ -1180,6 +1232,7 @@ static void TestConfigFile(const std::string& path, bool shipped_expectations)
 	CHECK(settings.ignore_summoned);
 	CHECK(settings.protected_paths.size() == 1 && settings.protected_paths[0] == "/Missions/");
 	CHECK(settings.protected_families.empty());
+	CHECK(settings.protected_buffs == std::vector<std::string>{ "/ShinyAscended/" });
 	CHECK(settings.report_families.size() == 1 && settings.report_families[0].base_class == "Thrall_Character_BP_Base_C");
 	CHECK(settings.refresh_hours == 24);
 	CHECK(settings.refresh_min_age_minutes == 60);
@@ -1204,6 +1257,7 @@ int main(int argc, char** argv)
 	TestParsing();
 	TestMapLookup();
 	TestResolve();
+	TestBuffProtection();
 	TestPlan();
 	TestDensity();
 	TestBlockAreas();

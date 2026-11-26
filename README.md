@@ -40,9 +40,9 @@ or, in an existing clone:
 git submodule update --init --recursive
 ```
 
-The rule logic (`src/SpawnLogic.h`), the tests and the configs are the same in both folders; only
-`src/Main.cpp` and the project files differ by API. Build and install steps are in each folder's README;
-what each build supports is in [ASA and ASE differences](docs/asa-vs-ase.md).
+Both builds share the rule logic (`src/SpawnLogic.h`). The shipped configs use each game's Shiny mod path
+in `Protect.Buffs`. Build and install steps are in each folder's README. See
+[ASA and ASE differences](docs/asa-vs-ase.md) for what each build supports.
 
 ## Development
 

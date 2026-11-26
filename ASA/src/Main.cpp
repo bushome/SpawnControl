@@ -98,6 +98,7 @@ namespace
 		int deferrals = 0;
 		bool refresh = false;  // a rolling refresh pick, not a rule removal
 		bool area = false;     // inside a block area: removed whatever its class's rules
+		bool mesh = false;     // confirmed under-mesh: may bypass buff protection
 	};
 
 	struct CensusItem
@@ -111,6 +112,7 @@ namespace
 		bool in_band = false;      // in the ASA Genesis 1 ocean band (queued only with its Remove)
 		double radius = 0;
 		bool attached = false;
+		bool buff_protected = false;
 	};
 
 	struct Report
@@ -127,6 +129,7 @@ namespace
 		double plan_ms = 0;                   // time to plan the removals at the end of the census
 		std::vector<OverlapSample> overlap_samples;
 		std::vector<std::vector<DensityHotspot>> hotspots; // fullest cubes per density rule
+		std::vector<int> buff_protected_by_class; // wild, non-summoned creatures excluded from normal rules
 		std::vector<int> summoned_by_class;   // the summoned part of wild_by_class
 		std::vector<int> wild_by_class;       // every class, protected included
 		std::vector<int> mission_by_class;
@@ -147,6 +150,7 @@ namespace
 
 	std::vector<ClassEntry> g_classes;
 	std::unordered_map<UClass*, int> g_class_index;
+	std::unordered_map<UClass*, bool> g_buff_class_matches;
 
 	// Live counts: set by each finished census, adjusted by spawns and removals in between.
 	bool g_counts_ready = false;
@@ -486,6 +490,36 @@ namespace
 		return index;
 	}
 
+	// Buff presence belongs to this creature, never to its species. Cache only class matching;
+	// scan the live buff list again before removal so buffs gained while queued are respected.
+	bool HasProtectedBuff(APrimalDinoCharacter* dino)
+	{
+		if (g_settings.protected_buffs.empty())
+			return false;
+		for (APrimalBuff* buff : dino->BuffsField())
+		{
+			if (buff == nullptr || buff->bActorIsBeingDestroyed()())
+				continue;
+			UClass* cls = buff->ClassField();
+			if (cls == nullptr)
+				continue;
+			auto found = g_buff_class_matches.find(cls);
+			if (found == g_buff_class_matches.end())
+			{
+				ClassInfo info;
+				int depth = 0;
+				for (UStruct* current = cls; current != nullptr && depth < 32; current = current->SuperStructField(), ++depth)
+					info.chain.push_back(current->NameField().ToString().ToString());
+				info.path = ClassPathFromReference(AsaApi::IApiUtils::GetClassBlueprint(cls).ToString());
+				info.short_name = info.chain.empty() ? ShortNameFromPath(info.path) : info.chain.front();
+				found = g_buff_class_matches.emplace(cls, ExcludedBy(g_settings.protected_buffs, info)).first;
+			}
+			if (found->second)
+				return true;
+		}
+		return false;
+	}
+
 	enum class Kind
 	{
 		Other,    // not a wild creature: tamed, owned, dead
@@ -698,7 +732,7 @@ namespace
 		{
 			for (QueueItem& item : g_queue)
 			{
-				if (!item.refresh && item.creature.Get() != nullptr)
+				if (!item.refresh && item.creature.Get() != nullptr && !HasProtectedBuff(item.creature.Get()))
 					AdjustCounts(item.class_index, +1);
 			}
 		}
@@ -731,7 +765,8 @@ namespace
 			{
 				if (!had_rule[c] && c < g_last.wild_by_class.size())
 					g_class_counts[c] = g_last.wild_by_class[c] -
-						(c < g_last.summoned_by_class.size() ? g_last.summoned_by_class[c] : 0);
+						(c < g_last.summoned_by_class.size() ? g_last.summoned_by_class[c] : 0) -
+						(c < g_last.buff_protected_by_class.size() ? g_last.buff_protected_by_class[c] : 0);
 				for (int g : g_classes[c].rule.groups)
 				{
 					if (g >= 0 && static_cast<size_t>(g) < g_group_counts.size())
@@ -774,9 +809,18 @@ namespace
 			g_logging_enabled = settings.logging; // before the warnings below, so they honour it too
 			for (const std::string& warning : settings.warnings)
 				PluginLog()->warn("Config: {}", warning);
+			const bool buffs_changed = g_settings.protected_buffs != settings.protected_buffs;
+			g_buff_class_matches.clear();
 			g_settings = std::move(settings);
 			g_settings_loaded = true;
 			ApplyRules();
+			if (buffs_changed)
+			{
+				// Recount before enforcing limits with a different protected population.
+				g_counts_ready = false;
+				g_census_running = false;
+				g_seconds_since_census = g_settings.census_interval_seconds;
+			}
 			PluginLog()->info("Config loaded from {}: {} map section(s){}; using {} for {}", SummarizeSources(g_settings.sources),
 				g_settings.maps.size(), g_settings.has_default ? " and Default" : "",
 				g_rules != nullptr ? g_rules->name : std::string("no section"), g_section_source);
@@ -793,17 +837,38 @@ namespace
 	// Queue
 	// ------------------------------------------------------------------------------------------
 
-	// Returns false when the creature is already queued.
-	bool Enqueue(APrimalDinoCharacter* dino, int class_index, bool refresh = false, bool area = false)
+	// Returns false when already queued or buff-protected against an ordinary removal.
+	bool Enqueue(APrimalDinoCharacter* dino, int class_index, bool refresh = false, bool area = false, bool mesh = false)
 	{
+		if (!mesh && HasProtectedBuff(dino))
+			return false;
 		QueueItem item;
+		item.mesh = mesh;
 		item.creature = GetWeakReference(dino);
 		item.class_index = class_index;
 		item.refresh = refresh;
 		item.area = area;
 		const uint64_t key = WeakKey(item.creature);
 		if (!g_queued.insert(key).second)
+		{
+			// A pending ordinary removal or refresh can become a confirmed mesh removal.
+			if (mesh)
+			{
+				for (QueueItem& queued : g_queue)
+				{
+					if (WeakKey(queued.creature) != key)
+						continue;
+					const bool was_refresh = queued.refresh;
+					queued.refresh = false;
+					queued.area = true;
+					queued.mesh = true;
+					if (was_refresh && g_counts_ready && !HasProtectedBuff(dino) && HasAnyRule(g_classes[class_index].rule))
+						AdjustCounts(class_index, -1);
+					break;
+				}
+			}
 			return false;
+		}
 		g_queue.push_back(item);
 		return true;
 	}
@@ -908,7 +973,7 @@ namespace
 				// A refresh pick that no longer qualifies is dropped; the next census picks another.
 				g_queued.erase(WeakKey(item.creature));
 				if (dino == nullptr || !valid_class || Classify(dino) != Kind::Wild || g_classes[item.class_index].rule.is_protected ||
-					SkipsRefresh(g_settings, g_classes[item.class_index].info) || !RefreshAllowedNow(dino) ||
+					HasProtectedBuff(dino) || SkipsRefresh(g_settings, g_classes[item.class_index].info) || !RefreshAllowedNow(dino) ||
 					NearestPlayerDistance(dino->GetLocation(), players) < g_settings.refresh_player_distance)
 					continue;
 				dino->Destroy(false, true);
@@ -920,7 +985,7 @@ namespace
 				continue;
 			}
 			if (dino == nullptr || !valid_class || Classify(dino) != Kind::Wild || g_classes[item.class_index].rule.is_protected ||
-				(!item.area && !HasAnyRule(g_classes[item.class_index].rule)))
+				(!item.mesh && HasProtectedBuff(dino)) || (!item.area && !HasAnyRule(g_classes[item.class_index].rule)))
 			{
 				g_queued.erase(WeakKey(item.creature));
 				++g_removed_skipped;
@@ -1010,6 +1075,7 @@ namespace
 			g_building.wild_by_class.resize(g_classes.size(), 0);
 			g_building.mission_by_class.resize(g_classes.size(), 0);
 			g_building.summoned_by_class.resize(g_classes.size(), 0);
+			g_building.buff_protected_by_class.resize(g_classes.size(), 0);
 		}
 		const ClassRule& rule = g_classes[class_index].rule;
 
@@ -1034,7 +1100,11 @@ namespace
 			return;
 		}
 
-		if (g_settings.refresh_hours > 0 && !rule.is_protected && !SkipsRefresh(g_settings, g_classes[class_index].info))
+		const bool buff_protected = HasProtectedBuff(dino);
+		if (buff_protected)
+			++g_building.buff_protected_by_class[class_index];
+
+		if (g_settings.refresh_hours > 0 && !buff_protected && !rule.is_protected && !SkipsRefresh(g_settings, g_classes[class_index].info))
 		{
 			RefreshItem refresh;
 			refresh.creature = GetWeakReference(dino);
@@ -1050,7 +1120,7 @@ namespace
 		}
 
 		const FVector location = dino->GetLocation();
-		const bool in_band = g_ocean_band.enabled && !rule.is_protected && InOceanBand(location);
+		const bool in_band = g_ocean_band.enabled && !rule.is_protected && !buff_protected && InOceanBand(location);
 		if (in_band)
 			NoteOceanBand(dino, class_index, location);
 		// With its Remove, a creature in the ocean band goes like one in a block area: whatever its class.
@@ -1061,6 +1131,7 @@ namespace
 		CensusItem item;
 		item.creature = GetWeakReference(dino);
 		item.class_index = class_index;
+		item.buff_protected = buff_protected;
 		item.player_distance = NearestPlayerDistance(location, g_player_positions);
 		item.x = static_cast<double>(location.X);
 		item.y = static_cast<double>(location.Y);
@@ -1302,7 +1373,7 @@ namespace
 		{
 			const CensusItem& item = g_census_items[i];
 			creatures.push_back({ i, item.class_index, item.player_distance, item.x, item.y, item.z, item.in_cave, item.in_block_area,
-				item.radius, item.attached });
+				item.radius, item.attached, item.buff_protected });
 		}
 
 		static const std::vector<GroupRule> no_groups;
@@ -1389,7 +1460,7 @@ namespace
 			for (const CensusItem& item : g_census_items)
 			{
 				const ClassRule& rule = g_classes[item.class_index].rule;
-				if (rule.under_mesh && !rule.is_protected && !item.in_cave && !item.in_block_area)
+				if (rule.under_mesh && !rule.is_protected && !item.in_cave && (!item.in_block_area || item.buff_protected))
 					g_mesh_queue.push_back({ item.creature, item.class_index });
 			}
 			// Shuffled, so when the budget does not reach the end before the next census, a different part
@@ -1401,6 +1472,7 @@ namespace
 		g_building.wild_by_class.resize(g_classes.size(), 0);
 		g_building.mission_by_class.resize(g_classes.size(), 0);
 		g_building.summoned_by_class.resize(g_classes.size(), 0);
+		g_building.buff_protected_by_class.resize(g_classes.size(), 0);
 		g_last = g_building;
 		g_have_report = true;
 		g_census_items.clear();
@@ -1603,6 +1675,9 @@ namespace
 			origin.last_seen = g_census_number;
 			g_creature_zone[WeakKey(GetWeakReference(dino))] = origin;
 		}
+
+		if (HasProtectedBuff(dino))
+			return; // mesh origin was recorded above; ordinary rules do not count this creature
 
 		if (!g_rules->block_areas.empty())
 		{
@@ -1957,10 +2032,10 @@ namespace
 	void RemoveUnderMesh(APrimalDinoCharacter* dino, int class_index, const FVector& location)
 	{
 		size_t queued = 0;
-		if (Enqueue(dino, class_index, false, true))
+		if (Enqueue(dino, class_index, false, true, true))
 		{
 			++queued;
-			if (g_counts_ready && HasAnyRule(g_classes[class_index].rule))
+			if (g_counts_ready && !HasProtectedBuff(dino) && HasAnyRule(g_classes[class_index].rule))
 				AdjustCounts(class_index, -1);
 		}
 		// Young and pack members following it go too, or they would be left wandering where it was.
@@ -2259,6 +2334,11 @@ namespace
 			<< g_last.mission << " mission-owned";
 		if (g_last.summoned > 0)
 			out << ", " << g_last.summoned << " of the wild summoned by another creature (not limited)";
+		size_t buff_protected = 0;
+		for (int count : g_last.buff_protected_by_class)
+			buff_protected += count;
+		if (buff_protected > 0)
+			out << ", " << buff_protected << " buff-protected (under-mesh checks still apply)";
 		out << "\n";
 		out << "Queue " << g_queue.size() << ", removed " << g_removed_total << " (skipped " << g_removed_skipped
 			<< "), spawn check avg " << (g_hook_calls > 0 ? g_hook_total_us / g_hook_calls : 0.0) << " us, max "
@@ -2674,6 +2754,10 @@ namespace
 			<< g_settings.churn_removed << " of " << kChurnWindow << "\n";
 		if (g_ocean_band.enabled)
 			out << kOceanBandKey << ": " << (g_ocean_band.remove ? "removing" : "report only") << " (ASA Genesis 1 ocean band)\n";
+		out << "Protect.Buffs:";
+		for (const std::string& buff : g_settings.protected_buffs)
+			out << " " << buff;
+		out << (g_settings.protected_buffs.empty() ? " (none)" : " (under-mesh checks still apply)") << "\n";
 		if (g_rules == nullptr)
 		{
 			out << "No section for this map and no Default section, so nothing is ruled here\n";

@@ -45,6 +45,9 @@ Under-mesh checks, block areas and the other location rules run alongside this c
   when they use the same classes as ordinary wild creatures.
 - **Protected:** classes whose path contains a `Protect.PathContains` entry (`/Missions/` by default) or that
   derive from a `Protect.Families` class.
+- **Buff-protected:** wild creatures carrying a buff matched by `Protect.Buffs`, regardless of species.
+  They skip ordinary culling and rolling refresh and do not count toward population rules. The existing
+  under-mesh checks and confirmed removals still apply. See [Protect](config-reference.md#protect).
 - **Summoned:** with `IgnoreSummoned` (the default), creatures that appear after the first census without a
   spawn zone spawning them (a Gloon's Revenant escorts, creatures a mod spawns around another one). They are
   counted and shown in `List` but outside every rule; limit the summoner instead.

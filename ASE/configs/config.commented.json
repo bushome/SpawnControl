@@ -40,13 +40,21 @@
     "IgnoreSummoned": true
   },
 
-  // Never touched by blocks or limits, on every map.
+  // Protection on every map. Buff protection still allows confirmed under-mesh removals.
   "Protect": {
     // Class paths containing any of these. "/Missions/" covers outpost and mission creatures that
     // have their own classes.
     "PathContains": [ "/Missions/" ],
     // Classes deriving from any of these parents (e.g. "Thrall_Character_BP_Base_C" for all Thralls).
-    "Families": []
+    "Families": [],
+    // Wild creatures currently carrying one of these buffs skip ordinary culls and rolling refresh,
+    // but still receive the existing UnderMesh checks and confirmed removals. Short buff class names
+    // also match derived buffs; paths starting with "/" match a buff path substring (case-insensitive).
+    // Example: [ "Buff_YourEvent_C" ]. Other creatures of the same species remain subject to the rules.
+    // Spawn-entry refusal cannot see buffs before a creature exists; disable General.RefuseFullEntries
+    // if blocked/full entries must still spawn so their creatures' buffs can be checked afterward.
+    // The shipped entry covers Shiny! Dinos, including temporary effects on wild creatures.
+    "Buffs": [ "/Game/Mods/Shiny/" ]
   },
 
   // Rolling refresh: wild creatures are replaced a few at a time, oldest first, so the zones respawn them

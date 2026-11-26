@@ -2,9 +2,10 @@
 
 [Back to the docs index](README.md)
 
-`src/SpawnLogic.h`, the tests and the configs are the same file in both folders, so one config reads the same
-on both games. `src/Main.cpp` and the project files differ, and some features exist only on ASA because the
-ASE API lacks what they need, or because they were written for ASA maps.
+Both builds share the rule logic in `src/SpawnLogic.h` and read the same config format. The shipped
+`Protect.Buffs` list uses the Shiny mod path for each game. `src/Main.cpp` and the project files differ,
+and some features exist only on ASA because the ASE API lacks what they need or because they were written
+for ASA maps.
 
 | Feature | ASA | ASE |
 |---|---|---|

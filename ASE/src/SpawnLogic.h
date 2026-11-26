@@ -442,6 +442,7 @@ namespace SpawnControl
 
 		std::vector<std::string> protected_paths{ "/Missions/" };
 		std::vector<std::string> protected_families;
+		std::vector<std::string> protected_buffs; // per creature; under-mesh checks still apply
 		std::vector<ReportFamily> report_families;
 
 		std::vector<MapRules> maps;
@@ -944,7 +945,7 @@ namespace SpawnControl
 				WarnUnknown(root["General"], { "RemovalsPerTick", "CensusActorsPerTick", "CensusIntervalSeconds", "NearPlayerDistance",
 					"Logging", "LogRemovals", "RefuseFullEntries", "IgnoreSummoned", "ChurnRemoved" }, "General.", warnings);
 			if (root.contains("Protect"))
-				WarnUnknown(root["Protect"], { "PathContains", "Families" }, "Protect.", warnings);
+				WarnUnknown(root["Protect"], { "PathContains", "Families", "Buffs" }, "Protect.", warnings);
 			if (root.contains("Refresh"))
 				WarnUnknown(root["Refresh"], { "TurnoverHours", "MinAgeMinutes", "PlayerDistance", "RecentDamageSeconds",
 					"SkipPathContains" }, "Refresh.", warnings);
@@ -1008,6 +1009,7 @@ namespace SpawnControl
 		const nlohmann::json protect = root.value("Protect", nlohmann::json::object());
 		settings.protected_paths = detail::ReadStrings(protect, "PathContains", settings.protected_paths, warnings, "Protect.");
 		settings.protected_families = detail::ReadStrings(protect, "Families", {}, warnings, "Protect.");
+		settings.protected_buffs = detail::ReadStrings(protect, "Buffs", {}, warnings, "Protect.");
 
 		if (root.contains("ReportFamilies"))
 		{
@@ -1233,6 +1235,7 @@ namespace SpawnControl
 		bool in_block_area = false;  // inside a block area: removed whatever its class
 		double radius = 0;           // collision radius; 0 = unknown, never counted as overlapping
 		bool attached = false;       // riding or carried: sits inside another creature on purpose
+		bool buff_protected = false; // outside normal rules and counts; caller still tests under-mesh
 	};
 
 	struct OverlapSample
@@ -1315,7 +1318,7 @@ namespace SpawnControl
 			{
 				const Creature& c = creatures[i];
 				if (c.class_index < 0 || static_cast<size_t>(c.class_index) >= rules.size() || rules[c.class_index].is_protected ||
-					!rules[c.class_index].overlap || c.in_block_area || c.attached || !(c.radius > 0 && c.radius <= kMaxOverlapRadius) ||
+					c.buff_protected || !rules[c.class_index].overlap || c.in_block_area || c.attached || !(c.radius > 0 && c.radius <= kMaxOverlapRadius) ||
 					!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z))
 					continue;
 				order.push_back(i);
@@ -1388,7 +1391,7 @@ namespace SpawnControl
 			if (creature.class_index < 0 || static_cast<size_t>(creature.class_index) >= rules.size())
 				continue;
 			const ClassRule& rule = rules[creature.class_index];
-			if (rule.is_protected || removed[i])
+			if (rule.is_protected || creature.buff_protected || removed[i])
 				continue;
 			if (creature.in_block_area)
 			{
@@ -1495,7 +1498,7 @@ namespace SpawnControl
 			for (size_t i = 0; i < creatures.size(); ++i)
 			{
 				const int c = creatures[i].class_index;
-				if (removed[i] || skips_density[i] || c < 0 || static_cast<size_t>(c) >= rules.size() || rules[c].is_protected)
+				if (removed[i] || creatures[i].buff_protected || skips_density[i] || c < 0 || static_cast<size_t>(c) >= rules.size() || rules[c].is_protected)
 					continue;
 				const auto& member_of = rules[c].density;
 				if (std::find(member_of.begin(), member_of.end(), static_cast<int>(d)) != member_of.end())

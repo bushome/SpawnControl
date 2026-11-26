@@ -11,7 +11,8 @@
   },
   "Protect": {
     "PathContains": [ "/Missions/" ],
-    "Families": []
+    "Families": [],
+    "Buffs": [ "/ShinyAscended/" ]
   },
   "Refresh": {
     "TurnoverHours": 24,
