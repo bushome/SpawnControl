@@ -1,7 +1,7 @@
 {
   "FullName": "Spawn Control",
   "Description": "Per-map blocks, limits and group limits for wild creatures, enforced gradually without touching tamed or mission creatures",
-  "Version": 1.0,
+  "Version": 1.1,
   "MinApiVersion": 1.19,
   "Dependencies": []
 }
