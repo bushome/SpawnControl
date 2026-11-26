@@ -25,7 +25,7 @@
     // Creatures closer than this to any player (Unreal units, 300 = one foundation) are removed last.
     "NearPlayerDistance": 10000,
     // Once a minute, log how many creatures were removed and of which classes, largest first. Also gates the
-    // under-mesh lines (up to 20 a minute, the rest counted in one line). List shows the same either way.
+    // under-mesh lines (up to 20 a minute, the rest counted in one line). List verbose shows the same either way.
     "LogRemovals": true,
     // Zones choosing what to spawn skip entries whose creatures are all blocked or at their limit, so they
     // spawn other species instead of creatures that would only be removed again.
@@ -75,7 +75,7 @@
     "SkipPathContains": [ "/Missions/", "Thrall", "Boss" ]
   },
 
-  // Extra summary rows in SpawnControl.List: label -> parent class. Reporting only, no effect on removal.
+  // Extra summary rows in SpawnControl.List verbose: label -> parent class. Reporting only, no effect on removal.
   "ReportFamilies": {
     "Thralls": "Thrall_Character_BP_Base_C"
   },
@@ -151,7 +151,7 @@
         "Exclude": [ "Thrall_Character_BP_Base_C" ]
       },
       // Creatures under the map or inside rock, found with the game's own under-mesh test. Awake creatures
-      // are tested at ChecksPerSecond; List and the log show what was found. With Remove, a creature found
+      // are tested at ChecksPerSecond; List verbose and the log show what was found. With Remove, a creature found
       // below the surface on two separate censuses is removed (with its wild followers on ASA). Leave the
       // key out to turn it off.
       "UnderMesh": {
@@ -161,13 +161,13 @@
         // Raise ChecksPerSecond with it (about 200 covers a 21,000-creature map every census).
         "IncludeStasis": false,
         // With Remove: a spawn zone whose creatures keep being removed under the mesh (5 or more, with at most
-        // one clear creature per 5 removed) is stopped, as block areas stop zones. List names each one; a reload
+        // one clear creature per 5 removed) is stopped, as block areas stop zones. List verbose names each one; a reload
         // starts over. Zones that also spawn where creatures belong are never stopped.
         "StopZones": true,
         // Without Remove: still remove creatures found below, on two censuses, with no ground within 100 foundations
         // under them (fallen out of the world). Implies the ground trace for those it removes.
         "RemoveNoGround": false,
-        // Also trace straight down from each suspect and report how far below the ground is (List, log).
+        // Also trace straight down from each suspect and report how far below the ground is (List verbose, log).
         // Reported only; nothing removed changes.
         "TraceGround": false,
         // A creature the test finds under foliage (a tree trunk, a bush) with ground below it counts as clear:

@@ -52,10 +52,10 @@ so there they are tested on their own.
 
 **Foliage.** A creature standing under a tree or bush can test as under, because the hit is the plant. With
 `IgnoreFoliage`, a hit on a `Foliage` component is traced for ground: with ground below the creature counts
-clear; with none it counts as under as before. `List` counts these and `MeshHere` marks them
+clear; with none it counts as under as before. `List verbose` counts these and `MeshHere` marks them
 `[foliage with ground below: counted clear]`.
 
-**Reporting.** `List` shows how many were tested, the cost per test and the last 10 suspects with location.
+**Reporting.** `List verbose` shows how many were tested, the cost per test and the last 10 suspects with location.
 With `LogRemovals` on and `Remove` off, the log names each new suspect (up to 20 a minute).
 
 ## Reading suspects
@@ -73,7 +73,7 @@ Each suspect line gives where the test hit relative to the creature (`hit 4.1 fd
 
 ## Repeat spots and stopped zones
 
-`List` groups the last 1,500 removals into repeat spots: 3 or more within 10 foundations, not already in a
+`List verbose` groups the last 1,500 removals into repeat spots: 3 or more within 10 foundations, not already in a
 block area. Each is printed with a `BlockAreas` line to paste. A spot like that is a spawn point inside the
 terrain, and blocking it stops its zone instead of feeding the removal queue. Without `Remove`, repeat spots
 come from suspects instead (each creature counted once), with a summary of their ground readings, so a map
@@ -85,7 +85,7 @@ most one creature testing clear per 5 removed is stopped, as a block area stops 
 spread over a wide patch of bad ground, or behind a cave wall, where a block area would also cover the real
 ground or cave next to it. A zone that also spawns where creatures belong keeps enough clear creatures never
 to be stopped. Only creatures spawned after the first census are traced, so it starts counting as the zones
-respawn. The log names each stopped zone and `List` lists them; a reload starts over.
+respawn. The log names each stopped zone and `List verbose` lists them; a reload starts over.
 
 ## BlockAreas
 
@@ -99,10 +99,10 @@ census and as soon as it spawns. With `[x, y, z]` the area is a sphere, so the g
 spot is untouched; with `[x, y]` it is a column at any height.
 
 A zone that puts 3 creatures inside and none anywhere else has all its spawn entries refused from then on, so
-it stops spawning there; the log names it and `List` shows it. A reload clears what was learned about zones.
+it stops spawning there; the log names it and `List verbose` shows it. A reload clears what was learned about zones.
 
 Block areas are tied to the map's geometry, so ASA areas do not carry over to ASE. The fullest-cube line
-under a density rule in `List` is another quick way to find spots worth blocking.
+under a density rule in `List verbose` is another quick way to find spots worth blocking.
 
 ## AutoBlockRepeats
 
@@ -112,14 +112,14 @@ under a density rule in `List` is another quick way to find spots worth blocking
 
 Off unless `Enabled`. After each census, a spot where at least `MinRemoved` under-mesh removals happened
 within 10 foundations becomes a block area by itself, named `Auto N <class>`, as long as it is at most
-`MaxRadiusInFoundations` wide (wider spots are too scattered to be one spawn point and stay in `List`). The
+`MaxRadiusInFoundations` wide (wider spots are too scattered to be one spawn point and stay in `List verbose`). The
 log names each one. It then works like a pasted area: creatures inside are removed and zones that only spawn
 there are stopped. A map keeps at most `MaxAreas`.
 
 It needs `UnderMesh` with `Remove`, a [SharedConfig folder](config-reference.md#one-config-for-every-server-sharedconfig)
 and a map file for the map. The areas are saved to `<Map>.auto.json` next to it, in the `BlockAreas` format,
 and read back on every load (also with `Enabled` false). Edit or delete that file by hand to change them,
-then reload; to keep one for good, move it into the map file. Only that map's server writes it. `List` marks
+then reload; to keep one for good, move it into the map file. Only that map's server writes it. `List verbose` marks
 auto areas `(auto)`.
 
 ## AsaGen1OceanBand
@@ -136,7 +136,7 @@ has fallen through the ocean floor or spawned under it. Inside the ocean's X/Y (
 -1,113,644 to 1,115,730), each census finds wild creatures with Z between 80,000 and 254,250, or 182,450 over
 the deeper coral zone (about -128,036 to 126,996 by -202,655 to 203,305).
 
-Reported only by default: `List` gives the count at the last census, the top classes and the last 10
+Reported only by default: `List verbose` gives the count at the last census, the top classes and the last 10
 creatures found with their location; the log names each new one (up to 20 a minute, while `LogRemovals` is
 on). With `"Remove": true` they are removed like creatures in a block area, whatever their class. Protected
 classes, tamed, mission and summoned creatures are left out. Anywhere else the key is ignored with a warning.

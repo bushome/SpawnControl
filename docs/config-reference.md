@@ -76,7 +76,7 @@ written twice takes the later value. `SpawnControl.Rules` shows the merged resul
 | `ChurnRemoved` | 12 | How many of a zone's last 20 spawns must be removed on arrival before it is held back (1 to 20). See [Limits and churn](limits-and-churn.md#churn-guard). |
 | `IgnoreSummoned` | true | Leave creatures summoned by another creature out of every rule: a wild creature that appears after the first census without a spawn zone spawning it. They are counted in the census and shown in `List`. Limit the summoner instead. |
 | `Logging` | true | `false` turns off everything the plugin writes to the API log and the console, errors included, whatever `LogRemovals` says. Commands still answer in chat and RCON. |
-| `LogRemovals` | true | Once a minute, log how many creatures were removed and how many zone spawn entries were refused, by class. Once a class is at its limit, this shows how hard the zones still push for it. Also the under-mesh lines: up to 20 a minute name each removal (or, in report mode, each new suspect), and one line a minute counts the rest. With it off none of these are logged; `List` shows the same counts and spots either way. |
+| `LogRemovals` | true | Once a minute, log how many creatures were removed and how many zone spawn entries were refused, by class. Once a class is at its limit, this shows how hard the zones still push for it. Also the under-mesh lines: up to 20 a minute name each removal (or, in report mode, each new suspect), and one line a minute counts the rest. With it off none of these are logged; `List verbose` shows the same counts and spots either way. |
 
 ## Protect
 
@@ -115,12 +115,12 @@ checked afterward. Buffs applied after `BeginPlay` are respected when the remova
 | `SkipPathContains` | `["/Missions/", "Thrall", "Boss"]` | Classes whose path contains any of these are never refreshed. |
 
 Tamed, mission-owned, class-protected and buff-protected creatures are never refreshed. Refreshes are logged once a minute
-(`Refreshed in the last 60 s`) and counted in `SpawnControl.List`. How the turnover works is in
+(`Refreshed in the last 60 s`) and counted in `SpawnControl.List verbose`. How the turnover works is in
 [How it works](how-it-works.md#the-cycle).
 
 ## ReportFamilies
 
-Label -> parent class. Each becomes a summary row in `SpawnControl.List` (wild without a mission, and
+Label -> parent class. Each becomes a summary row in `SpawnControl.List verbose` (wild without a mission, and
 mission-owned). Reporting only. Shipped: `"Thralls": "Thrall_Character_BP_Base_C"`.
 
 ## Maps
@@ -149,7 +149,7 @@ picked and why.
 | `GroupLimit` | Name -> `{ "Max": n, "Classes": [...] }`. One maximum shared by all the classes listed. When over, creatures are taken from whichever class has the most, so both shrink together. |
 | `Density` | Key -> `{ "Max": n, "AreaInFoundations": a }`, optionally with `"Classes": [...]` and `"Exclude": [...]`. Clump cap: no cube `a` foundations across may hold more than `n` of the class (the key), of the listed classes together, or of every wild creature (key `"*"`). `Exclude` lists classes the rule never counts, such as packs meant to be dense: a short name also matches every class derived from it (`"Thrall_Character_BP_Base_C"` keeps out every thrall), and an entry starting with `/` matches every class whose path contains it (`"/ZombieDino/"` keeps out a whole folder). Checked each census on two grids, the second shifted by half a cube, so a clump on a cube edge is still caught. Over-full spots lose their creatures farthest from players first; removals still wait for players to move off as usual. Area is capped at 200 foundations. Density removals are not refused at spawn, so a density rule on a creature that respawns quickly churns; use a `Limit` for those. |
 | `DensitySkip` | `{ "Caves": true, "Areas": [ { "Name": "City", "Location": [x, y, z], "RadiusInFoundations": r } ] }`. Where density rules do not apply: creatures the game spawned in a cave or boss area (default on; ASA only, the ASE API has no cave flag), and horizontal circles of `r` foundations around a point (z is ignored; `ccc` in game gives x and y). Use it for places that are meant to be dense, such as a city, corrupted zones or a boss arena. Blocks, limits and groups still apply there. |
-| `Overlap` | `{ "Fraction": 0.5, "Exclude": [...] }`. Creatures spawned inside one another: two overlap when their centres are closer than `Fraction` (0.1 to 1) of their summed collision radii, read from each creature's capsule. Of each stack, the one nearest a player stays and the rest are removed, before limits are counted. Riders, carried creatures, summoned, mission and protected creatures are never counted; `Exclude` works as for `Density`. Small flyers that pass through other creatures (Dragonfly) can be caught mid-pass; add them to `Exclude`. Leave the key out to turn it off. `List` shows how many the last census found and where. |
+| `Overlap` | `{ "Fraction": 0.5, "Exclude": [...] }`. Creatures spawned inside one another: two overlap when their centres are closer than `Fraction` (0.1 to 1) of their summed collision radii, read from each creature's capsule. Of each stack, the one nearest a player stays and the rest are removed, before limits are counted. Riders, carried creatures, summoned, mission and protected creatures are never counted; `Exclude` works as for `Density`. Small flyers that pass through other creatures (Dragonfly) can be caught mid-pass; add them to `Exclude`. Leave the key out to turn it off. `List verbose` shows how many the last census found and where. |
 | `UnderMesh` | Find and remove creatures under the map or inside its geometry. See [Under-mesh and block areas](under-mesh.md#undermesh). |
 | `BlockAreas` | Places where no wild creature belongs. See [Under-mesh and block areas](under-mesh.md#blockareas). |
 | `AutoBlockRepeats` | Turn repeat under-mesh spots into block areas automatically. See [Under-mesh and block areas](under-mesh.md#autoblockrepeats). |

@@ -18,8 +18,8 @@ for ASA maps.
 | `BlockAreas`, `AutoBlockRepeats` | yes | yes |
 | `AsaGen1OceanBand` | yes | ignored with a warning |
 | `EnableZones`, `DisableZones`, `AutoDisableZones`, `SpawnPoints` | yes | ignored with a warning |
-| `SpawnControl.Zones`, `SpawnControl.Links` | yes | no |
-| `List`'s Failing zones section | yes | no (no zone tooling) |
+| `SpawnControl.Zones` | yes | no |
+| Failing zones (`List verbose` and `List failing`) | yes | no (no zone tooling) |
 | Mission creatures left alone | Lost Colony outposts, Genesis missions | Genesis Part 1 and 2 missions |
 | Map name match | `_WP` suffix may be left off | as reported |
 | Hot-reload file name | `SpawnControl.dll.arkapi` | `SpawnControl.dll.ArkApi` |

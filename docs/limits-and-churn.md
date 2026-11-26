@@ -64,7 +64,7 @@ If Windows refuses to run it, either run it once with
 
 **Zones refill.** Capping a class does not lower a spawn zone's target count: the zone fills its slots with
 its other entries, so the next class grows. Each round shifts less (thousands, then hundreds, then dozens).
-Compare the total wild count on `List` line 1 before and after a round to see the real effect. Two or three
+Compare the total wild count on the `List` census line before and after a round to see the real effect. Two or three
 rounds per map is typical.
 
 **Density vs Limit.** Density removals are not refused at spawn and the churn guard does not cover them, so
@@ -88,11 +88,11 @@ and resumes as soon as one has room. Held zones are kept through `SpawnControl.R
 classes against the new limits; a server restart starts over.
 
 The log names a zone the first time it is held, with the actual count:
-`20 of its last 20 spawns were over a limit and removed on arrival`. `List` shows the zones held now, and the
+`20 of its last 20 spawns were over a limit and removed on arrival`. `List verbose` shows the zones held now, and the
 five unheld zones with the most removals on arrival (`feeding:` lines with their share removed and last-20
 count).
 
-Tuning `ChurnRemoved`: lower it if `List` shows unheld zones feeding at a high share; raise it if zones are
+Tuning `ChurnRemoved`: lower it if `List verbose` shows unheld zones feeding at a high share; raise it if zones are
 held whose other, unlimited classes you want to keep spawning. 12 has needed no tuning so far.
 
 ## Things that look wrong but are not

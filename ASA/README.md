@@ -67,7 +67,7 @@ reloading is enabled in AsaApi's own `config.json`, AsaApi swaps it in.
 1. Run `SpawnControl.List`. The first line shows the map name the server reports and which config section is
    in use. If it says `section none`, add a section under `Maps` with that name (or the name without `_WP`)
    and run `SpawnControl.Reload`.
-2. The list ends with the ten largest classes that have no rule: the candidates for a limit.
+2. `SpawnControl.List verbose` ends with the ten largest classes that have no rule. These are candidates for a limit.
 3. `SpawnControl.List <text>` shows every class whose path contains the text, with wild and mission counts
    and the full path to paste into the config, e.g. `SpawnControl.List otter`.
 4. Once the map has settled, survey it and set limits as in [Limits and churn](../docs/limits-and-churn.md).

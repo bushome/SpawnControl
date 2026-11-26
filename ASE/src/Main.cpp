@@ -39,6 +39,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -788,7 +789,7 @@ namespace
 		if (g_mesh_unlogged_this_minute > 0)
 		{
 			if (g_settings.log_removals)
-				PluginLog()->info("Under mesh: {} more removed in the last {} s without a line each; {} shows where they cluster",
+				PluginLog()->info("Under mesh: {} more removed in the last {} s without a line each; {} verbose shows where they cluster",
 					g_mesh_unlogged_this_minute, kLogIntervalSeconds, kCmdList);
 			g_mesh_unlogged_this_minute = 0;
 		}
@@ -1881,23 +1882,70 @@ namespace
 	// Commands
 	// ------------------------------------------------------------------------------------------
 
-	std::string ListText(const std::string& filter)
+	void AppendMatchingClasses(std::ostringstream& out, std::string_view filter)
 	{
+		// Every class whose name or path contains the filter, with its rule.
+		const std::string needle = ToLower(filter);
+		for (size_t c = 0; c < g_classes.size() && c < g_last.wild_by_class.size(); ++c)
+		{
+			const ClassEntry& entry = g_classes[c];
+			if (ToLower(entry.info.path).find(needle) == std::string::npos)
+				continue;
+			out << "  " << entry.info.short_name << ": " << g_last.wild_by_class[c] << " wild";
+			if (g_last.mission_by_class[c] > 0)
+				out << ", " << g_last.mission_by_class[c] << " mission";
+			if (g_last.summoned_by_class[c] > 0)
+				out << " (" << g_last.summoned_by_class[c] << " of them summoned)";
+			if (entry.rule.is_protected)
+				out << " [protected]";
+			if (entry.rule.blocked)
+				out << " [blocked]";
+			if (entry.rule.limit != kNoLimit)
+				out << " [limit " << entry.rule.limit << "]";
+			out << "\n    " << entry.info.path << "\n";
+			// Parent classes up to the base creature class, for Exclude and Protect.Families entries.
+			std::string parents;
+			for (size_t p = 1; p < entry.info.chain.size(); ++p)
+			{
+				parents += (parents.empty() ? "" : " > ") + entry.info.chain[p];
+				if (entry.info.chain[p] == "PrimalDinoCharacter")
+					break;
+			}
+			if (!parents.empty())
+				out << "    parents: " << parents << "\n";
+		}
+	}
+
+	std::string ListText(std::string_view filter)
+	{
+		constexpr std::string_view whitespace = " \t\r\n";
+		const size_t first = filter.find_first_not_of(whitespace);
+		filter = first == std::string_view::npos ? std::string_view{} : filter.substr(first, filter.find_last_not_of(whitespace) - first + 1);
+		const bool verbose = EqualsNoCase(filter, "verbose");
 		std::ostringstream out;
 		out << "SpawnControl on " << (g_map_name.empty() ? std::string("?") : g_map_name) << ": section "
 			<< (g_rules != nullptr ? g_rules->name : std::string("none")) << " (" << g_section_source << ")\n";
 
+		if (!g_settings_loaded)
+		{
+			out << "Config failed to load. Check the server log and run " << kCmdReload << " after fixing it.\n";
+			return out.str();
+		}
 		if (!g_have_report)
 		{
-			out << "First census still running.\n";
+			out << "Waiting for the first census.\n";
 			return out.str();
 		}
 
 		const double age = std::chrono::duration<double>(Clock::now() - g_last.finished).count();
-		out << "Census " << static_cast<int>(age) << " s ago (" << std::fixed;
-		out.precision(1);
-		out << g_last.seconds << " s, " << g_last.actors << " actors, planned in " << g_last.plan_ms << " ms): " << g_last.wild << " wild, "
-			<< g_last.mission << " mission-owned";
+		out << "Census " << static_cast<int>(age) << " s ago";
+		if (verbose)
+		{
+			out << std::fixed;
+			out.precision(1);
+			out << " (" << g_last.seconds << " s, " << g_last.actors << " actors, planned in " << g_last.plan_ms << " ms)";
+		}
+		out << ": " << g_last.wild << " wild, " << g_last.mission << " mission-owned";
 		if (g_last.summoned > 0)
 			out << ", " << g_last.summoned << " of the wild summoned by another creature (not limited)";
 		size_t buff_protected = 0;
@@ -1906,8 +1954,32 @@ namespace
 		if (buff_protected > 0)
 			out << ", " << buff_protected << " buff-protected (under-mesh checks still apply)";
 		out << "\n";
-		out << "Queue " << g_queue.size() << ", removed " << g_removed_total << " (skipped " << g_removed_skipped
-			<< "), spawn check avg " << (g_hook_calls > 0 ? g_hook_total_us / g_hook_calls : 0.0) << " us, max "
+		out << "Queue " << g_queue.size() << ", removed " << g_removed_total;
+		if (!verbose)
+		{
+			out << " since load\n";
+			if (!filter.empty())
+			{
+				AppendMatchingClasses(out, filter);
+				return out.str();
+			}
+			if (!g_settings.warnings.empty())
+				out << "Config warnings at last load: " << g_settings.warnings.size() << "\n";
+			const bool entry_hook_missing = g_settings.refuse_full_entries && !g_entry_hook_installed;
+			if (!g_hook_installed || entry_hook_missing || !g_zone_hook_installed)
+			{
+				out << "Unavailable hooks:"
+					<< (g_hook_installed ? "" : " creature spawn")
+					<< (entry_hook_missing ? " spawn entry" : "")
+					<< (g_zone_hook_installed ? "" : " zone spawn") << "\n";
+			}
+			const auto low = std::count_if(g_usual.begin(), g_usual.end(), [](const UsualCount& usual) { return usual.low && usual.usual > 0; });
+			if (low > 0)
+				out << "Underpopulated classes: " << low << "\n";
+			out << "For details, run " << kCmdList << " verbose.\n";
+			return out.str();
+		}
+		out << " (skipped " << g_removed_skipped << "), spawn check avg " << (g_hook_calls > 0 ? g_hook_total_us / g_hook_calls : 0.0) << " us, max "
 			<< g_hook_max_us << " us\n";
 		out << "Per tick: census slice avg " << g_census_timing.Average() << " ms, max " << g_census_timing.max_ms
 			<< " ms; removals avg " << g_drain_timing.Average() << " ms, max " << g_drain_timing.max_ms << " ms ("
@@ -1984,41 +2056,6 @@ namespace
 					out << (i == 0 ? " " : ", ") << rows[i].first << " " << g_classes[rows[i].second].info.short_name;
 				out << (rows.size() > 8 ? ", ...\n" : "\n");
 			}
-		}
-
-		if (!filter.empty())
-		{
-			// Every class whose name or path contains the filter, with its rule.
-			const std::string needle = ToLower(filter);
-			for (size_t c = 0; c < g_classes.size() && c < g_last.wild_by_class.size(); ++c)
-			{
-				const ClassEntry& entry = g_classes[c];
-				if (ToLower(entry.info.path).find(needle) == std::string::npos)
-					continue;
-				out << "  " << entry.info.short_name << ": " << g_last.wild_by_class[c] << " wild";
-				if (g_last.mission_by_class[c] > 0)
-					out << ", " << g_last.mission_by_class[c] << " mission";
-				if (g_last.summoned_by_class[c] > 0)
-					out << " (" << g_last.summoned_by_class[c] << " of them summoned)";
-				if (entry.rule.is_protected)
-					out << " [protected]";
-				if (entry.rule.blocked)
-					out << " [blocked]";
-				if (entry.rule.limit != kNoLimit)
-					out << " [limit " << entry.rule.limit << "]";
-				out << "\n    " << entry.info.path << "\n";
-				// Parent classes up to the base creature class, for Exclude and Protect.Families entries.
-				std::string parents;
-				for (size_t p = 1; p < entry.info.chain.size(); ++p)
-				{
-					parents += (parents.empty() ? "" : " > ") + entry.info.chain[p];
-					if (entry.info.chain[p] == "PrimalDinoCharacter")
-						break;
-				}
-				if (!parents.empty())
-					out << "    parents: " << parents << "\n";
-			}
-			return out.str();
 		}
 
 		// Ruled classes and groups show the live count: the last census, minus what it queued for removal,

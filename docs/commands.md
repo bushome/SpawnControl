@@ -2,17 +2,19 @@
 
 [Back to the docs index](README.md)
 
-Admin console commands (`cheat SpawnControl.List`). `List`, `Rules` and `Reload` also work over RCON; the
-others need a player position and are console only. Every command's output is also written to the log.
+Use `cheat SpawnControl.List` in the admin console. `List`, `Rules` and `Reload` also work over RCON.
+`MeshHere` and `Zones` need a player position and are console only.
 
 | Command | Side | What it does |
 |---|---|---|
-| `SpawnControl.List [text]` | both | The plugin's status. See below. With text: every class whose path contains it, with counts, rules, full path and parent classes (for `Exclude` and `Protect.Families`). |
+| `SpawnControl.List` | both | Quick status with the active profile, census totals, removal queue and warnings. |
+| `SpawnControl.List verbose` | both | Full report with timings, counts by class, rules and location details. Use this to get the full report from earlier releases. |
+| `SpawnControl.List <text>` | both | Classes whose path contains the text, with counts, rules, full path and parent classes. |
+| `SpawnControl.List failing` | ASA | Failing zones and zones switched off by `AutoDisableZones`. |
 | `SpawnControl.Rules` | both | What this server is running with: the section and why it was picked, every file read, the General settings, then one line per map value saying whether it is the section's own or from `Default`, e.g. `UnderMesh.ChecksPerSecond = 40  (map; default 20)` or `Limit.Dodo_Character_BP_C removed  (map; default 250)`. |
 | `SpawnControl.Reload` | both | Re-reads `config.json` (and the shared file or folder it points to). A broken file keeps the old settings and reports the error. Live counts carry over, so limits keep holding without waiting for a census: classes that already had a rule keep their count, newly ruled classes start from the last census. |
 | `SpawnControl.MeshHere [foundations]` | both | Runs the game's under-mesh test right now on every creature within that many foundations of you (default 30, up to 200), whatever its state, and lists each one, under first, then nearest first: class, distance, height difference, wild/mission/summoned/tamed, awake or in stasis, the result (`UNDER (overlapping)`, `UNDER (below)` or `clear`) with what the test hit, and the hit and ground heights. For checking suspects and finding misses. See [Under-mesh](under-mesh.md#reading-suspects). |
 | `SpawnControl.Zones [foundations] [text]` | ASA | Spawn zones near you, for zones that spawn too little. See [Zones and spawn points](zones-and-spawn-points.md#diagnosing-a-zone-spawncontrolzones). |
-| `SpawnControl.Links <text>` | ASA | For wild creatures whose class path contains the text: what they are linked to (owner, instigator, wild following parent, followers they lead, zone manager link), as counts. One pass over all actors; for diagnosing creatures that spawn others. |
 
 ## Reading `SpawnControl.List`
 
@@ -23,8 +25,9 @@ The first lines are the quick health check:
   creatures counted separately.
 - **Queue:** the removal queue and how many have been removed (`Queue N, removed N`). A queue at or near 0
   means the map is steady.
+- **Warnings:** config warnings, unavailable hooks and how many classes are underpopulated, when applicable.
 
-Then, in order: rolling refresh total; spawn-check timing and per-tick time spent on census slices and
+`SpawnControl.List verbose` adds the rolling refresh total, spawn-check timing and per-tick time spent on census slices and
 removals (average and worst, in ms); zone entries checked and refused; zones held back for churning and the
 unheld zones feeding the most removals; underpopulated classes; every limited or blocked class and every group with its count now and
 each member's count; the density rules with the 10 fullest cubes each found last census, one per spot (count,
@@ -54,6 +57,6 @@ three quarters. Protected and blocked classes are skipped.
 Counts are the last census minus what it queued for removal, plus spawns since. Max values are kept since
 load.
 
-**Checking for hitches without a player online:** `List` over RCON shows the worst tick the census and the
+**Checking for hitches without a player online:** `List verbose` over RCON shows the worst tick the census and the
 removals have taken. A few milliseconds is invisible; if the removals' max climbs, lower `RemovalsPerTick`,
 and if the census slice's does, lower `CensusActorsPerTick`.

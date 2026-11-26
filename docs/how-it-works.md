@@ -14,7 +14,7 @@ the map. Only wild creatures are touched.
    farthest from any player. A new pass starts every `CensusIntervalSeconds`.
 2. **Spawn check.** `APrimalDinoCharacter::BeginPlay` is hooked. Once the first census has finished, a wild
    creature that appears over its limit, over its group's limit, or of a blocked class is queued right away.
-   The check is a cached rule lookup and a counter comparison; `SpawnControl.List` shows its average and
+   The check is a cached rule lookup and a counter comparison; `SpawnControl.List verbose` shows its average and
    worst time.
 3. **Zones skip full classes.** `ANPCZoneManager::IsValidNPCEntry` is hooked. When a zone weighs one of its
    spawn entries and every creature class in it is blocked or at its limit (or its group is), the entry is
