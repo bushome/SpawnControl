@@ -46,5 +46,5 @@ in `Protect.Buffs`. Build and install steps are in each folder's README. See
 
 ## Development
 
-Developed with AI assistance (Claude). Every change was reviewed and tested on a dedicated test server
+Developed with AI assistance (Claude Opus 5.5 and Codex GPT 6.2 Sol). Every change was reviewed and tested on a dedicated test server
 before going live.
