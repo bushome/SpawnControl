@@ -30,12 +30,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cwchar>
 #include <cwctype>
 #include <deque>
 #include <charconv>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -89,6 +89,7 @@ namespace
 	{
 		ClassInfo info;
 		ClassRule rule;
+		bool skip_refresh_path = false;
 	};
 
 	struct QueueItem
@@ -134,10 +135,6 @@ namespace
 		std::vector<int> mission_by_class;
 		std::vector<size_t> family_wild;      // per report family, without a mission
 		std::vector<size_t> family_mission;
-		size_t planned = 0;
-		size_t blocked = 0;
-		size_t over_limit = 0;
-		size_t over_group = 0;
 	};
 
 	Settings g_settings;
@@ -300,7 +297,6 @@ namespace
 	uint64_t g_mesh_checks = 0;
 	uint64_t g_mesh_suspects = 0;
 	std::unordered_map<int, uint32_t> g_mesh_suspects_by_class;   // class index -> suspects since load
-	uint64_t g_mesh_in_exclusion_zone = 0;
 	uint64_t g_mesh_foliage_clear = 0;   // foliage hits with ground below, counted clear (UnderMesh.IgnoreFoliage)
 	double g_mesh_total_us = 0;
 	double g_mesh_max_us = 0;
@@ -422,6 +418,12 @@ namespace
 		return true;
 	}
 
+	void ResolveEntryRules(ClassEntry& entry)
+	{
+		entry.rule = ResolveClass(g_settings, g_rules, entry.info);
+		entry.skip_refresh_path = SkipsRefresh(g_settings, entry.info);
+	}
+
 	// Class entry for a creature class: path, name chain and resolved rule, built once and cached.
 	int ClassIndexFor(UClass* cls)
 	{
@@ -437,7 +439,7 @@ namespace
 		entry.info.short_name = !entry.info.chain.empty() ? entry.info.chain.front() : ShortNameFromPath(entry.info.path);
 		if (entry.info.path.empty())
 			entry.info.path = entry.info.short_name;
-		entry.rule = ResolveClass(g_settings, g_rules, entry.info);
+		ResolveEntryRules(entry);
 
 		const int index = static_cast<int>(g_classes.size());
 		g_classes.push_back(std::move(entry));
@@ -637,7 +639,7 @@ namespace
 		for (size_t c = 0; c < g_classes.size(); ++c)
 			had_rule[c] = HasAnyRule(g_classes[c].rule);
 		for (ClassEntry& entry : g_classes)
-			entry.rule = ResolveClass(g_settings, g_rules, entry.info);
+			ResolveEntryRules(entry);
 
 		// Keep enforcing through a reload: classes that were counted keep their live count, classes that
 		// just got a rule start from the last census, groups are summed from their members. The next
@@ -853,7 +855,7 @@ namespace
 				// A refresh pick that no longer qualifies is dropped; the next census picks another.
 				g_queued.erase(WeakKey(item.creature));
 				if (dino == nullptr || !valid_class || Classify(dino) != Kind::Wild || g_classes[item.class_index].rule.is_protected ||
-					HasProtectedBuff(dino) || SkipsRefresh(g_settings, g_classes[item.class_index].info) || !RefreshAllowedNow(dino) ||
+					HasProtectedBuff(dino) || g_classes[item.class_index].skip_refresh_path || !RefreshAllowedNow(dino) ||
 					NearestPlayerDistance(ActorLocation(dino), players) < g_settings.refresh_player_distance)
 					continue;
 				dino->Destroy(false, true);
@@ -951,7 +953,13 @@ namespace
 		if (buff_protected)
 			++g_building.buff_protected_by_class[class_index];
 
-		if (g_settings.refresh_hours > 0 && !buff_protected && !rule.is_protected && !SkipsRefresh(g_settings, g_classes[class_index].info))
+		struct RefreshPosition
+		{
+			FVector location;
+			double player_distance;
+		};
+		std::optional<RefreshPosition> refresh_position;
+		if (g_settings.refresh_hours > 0 && !buff_protected && !rule.is_protected && !g_classes[class_index].skip_refresh_path)
 		{
 			RefreshItem refresh;
 			refresh.creature = GetWeakReference(dino);
@@ -960,13 +968,15 @@ namespace
 			g_first_seen_building[refresh.key] = seen != g_first_seen.end() ? seen->second : SecondsSinceLoad();
 			if (RefreshAllowedNow(dino))
 			{
+				const FVector location = ActorLocation(dino);
 				refresh.class_index = class_index;
-				refresh.player_distance = NearestPlayerDistance(ActorLocation(dino), g_player_positions);
+				refresh.player_distance = NearestPlayerDistance(location, g_player_positions);
+				refresh_position = RefreshPosition{ location, refresh.player_distance };
 				g_refresh_items.push_back(refresh);
 			}
 		}
 
-		const FVector location = ActorLocation(dino);
+		const FVector location = refresh_position ? refresh_position->location : ActorLocation(dino);
 		const bool in_block_area = InBlockArea(location) >= 0;
 		if ((!HasAnyRule(rule) && !in_block_area) || rule.is_protected)
 			return;
@@ -975,7 +985,7 @@ namespace
 		item.creature = GetWeakReference(dino);
 		item.class_index = class_index;
 		item.buff_protected = buff_protected;
-		item.player_distance = NearestPlayerDistance(location, g_player_positions);
+		item.player_distance = refresh_position ? refresh_position->player_distance : NearestPlayerDistance(location, g_player_positions);
 		item.x = static_cast<double>(location.X);
 		item.y = static_cast<double>(location.Y);
 		item.z = static_cast<double>(location.Z);
@@ -1038,19 +1048,19 @@ namespace
 	{
 		namespace fs = std::filesystem;
 		const fs::path path = SpawnControl::detail::PathFromUtf8(g_settings.auto_folder) / SpawnControl::detail::PathFromUtf8(AutoAreasFileName(g_rules->name));
-		fs::path temp = path;
-		temp += ".tmp";
+		fs::path temporary_path = path;
+		temporary_path += ".tmp";
 		try
 		{
 			{
-				std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+				std::ofstream file(temporary_path, std::ios::binary | std::ios::trunc);
 				if (!file.is_open())
-					throw std::runtime_error("cannot write " + SpawnControl::detail::Utf8FromPath(temp));
+					throw std::runtime_error("cannot write " + SpawnControl::detail::Utf8FromPath(temporary_path));
 				file << AutoAreasJson(g_rules->block_areas, g_rules->auto_disabled_zones).dump(2) << "\n";
 				if (!file)
-					throw std::runtime_error("write failed for " + SpawnControl::detail::Utf8FromPath(temp));
+					throw std::runtime_error("write failed for " + SpawnControl::detail::Utf8FromPath(temporary_path));
 			}
-			fs::rename(temp, path);
+			fs::rename(temporary_path, path);
 		}
 		catch (const std::exception& e)
 		{
@@ -1247,10 +1257,6 @@ namespace
 
 		g_building.finished = Clock::now();
 		g_building.seconds = std::chrono::duration<double>(g_building.finished - g_census_started).count();
-		g_building.planned = plan.remove.size();
-		g_building.blocked = plan.blocked;
-		g_building.over_limit = plan.over_limit;
-		g_building.over_group = plan.over_group;
 		g_building.too_dense = plan.too_dense;
 		g_building.in_block_area = plan.in_block_area;
 		g_building.overlapping = plan.overlapping;
@@ -1630,10 +1636,10 @@ namespace
 		++g_zone_spawn_calls;
 		ANPCZoneManager* const outer_zone = g_current_zone;
 		g_current_zone = _this;
-		const bool result = ANPCZoneManager_SpawnNPCs_original(_this);
+		const bool spawn_returned_true = ANPCZoneManager_SpawnNPCs_original(_this);
 		g_current_zone = outer_zone;
 		--g_zone_spawn_depth;
-		return result;
+		return spawn_returned_true;
 	}
 
 	DECLARE_HOOK(APrimalDinoCharacter_BeginPlay, void, APrimalDinoCharacter*);
@@ -2433,19 +2439,8 @@ namespace
 	{
 		if (AShooterPlayerController* admin = AdminFrom(controller))
 		{
-			int radius = 30;
-			const std::string argument = CommandArgument(command);
-			if (!argument.empty())
-			{
-				try
-				{
-					radius = (std::max)(1, (std::min)(std::stoi(argument), 200));
-				}
-				catch (const std::exception&)
-				{
-				}
-			}
-			const std::string text = MeshHereText(ArkApi::IApiUtils::GetPosition(admin), radius);
+			const int radius_foundations = SpawnControl::detail::MeshHereRadius(CommandArgument(command));
+			const std::string text = MeshHereText(ArkApi::IApiUtils::GetPosition(admin), radius_foundations);
 			PluginLog()->info("MeshHere:\n{}", text);
 			SendAdmin(admin, text);
 		}

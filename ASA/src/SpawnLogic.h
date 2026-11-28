@@ -468,6 +468,22 @@ namespace SpawnControl
 
 	namespace detail
 	{
+		inline int MeshHereRadius(const std::string& argument)
+		{
+			constexpr int default_radius = 30;
+			if (argument.empty())
+				return default_radius;
+
+			try
+			{
+				return std::clamp(std::stoi(argument), 1, 200);
+			}
+			catch (const std::exception&)
+			{
+				return default_radius;
+			}
+		}
+
 		inline int ReadInt(const nlohmann::json& object, const char* key, int fallback, int minimum,
 			std::vector<std::string>& warnings)
 		{
